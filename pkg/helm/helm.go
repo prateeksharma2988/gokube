@@ -89,7 +89,7 @@ func PluginsVersion() error {
 func DownloadExecutable(helmURL string, helmVersion string, bar *pb.ProgressBar) error {
 	localFile := utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
 	if download.IsCurrentVersion(localFile, helmVersion) {
-		bar.SetTemplateString(`{{ green "helm" }} ` + helmVersion + ` already up to date (<1s)`)
+		bar.SetTemplateString(`{{ green "helm" }} ` + helmVersion + ` already up to date`)
 		bar.SetTotal(1)
 		bar.SetCurrent(1)
 		bar.Finish()

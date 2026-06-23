@@ -32,7 +32,7 @@ type FileMap struct {
 	Dst string
 }
 
-func fromUrl(url string, name string, dir string, fileName string, bar *pb.ProgressBar) (int64, error) {
+func fromUrl(url string, name string, dir string, fileName string, bar *pb.ProgressBar) (n int64, retErr error) {
 	file, err := os.Create(dir + string(os.PathSeparator) + fileName)
 	defer utils.CloseFile(file)
 	if err != nil {
@@ -53,12 +53,19 @@ func fromUrl(url string, name string, dir string, fileName string, bar *pb.Progr
 	bar.SetTemplateString(tmpl)
 	bar.SetTotal(int64(count))
 	bar.SetWidth(100)
-	defer bar.Finish()
+	dlStart := time.Now()
+	defer func() {
+		if retErr == nil {
+			d := time.Since(dlStart).Round(time.Second)
+			bar.SetTemplateString(`{{ green "` + name + `" }} done (` + d.String() + `)`)
+		}
+		bar.Finish()
+	}()
 
 	// create proxy reader
 	reader := bar.NewProxyReader(response.Body)
 	defer utils.ClosePBReader(reader)
-	n, err := io.Copy(file, reader)
+	n, err = io.Copy(file, reader)
 	if err != nil {
 		return -1, err
 	}

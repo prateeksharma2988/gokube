@@ -72,7 +72,7 @@ func Version() error {
 func DownloadExecutable(kubectlURL string, kubectlVersion string, bar *pb.ProgressBar) error {
 	localFile := utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
 	if download.IsCurrentVersion(localFile, kubectlVersion) {
-		bar.SetTemplateString(`{{ green "kubectl" }} ` + kubectlVersion + ` already up to date (<1s)`)
+		bar.SetTemplateString(`{{ green "kubectl" }} ` + kubectlVersion + ` already up to date`)
 		bar.SetTotal(1)
 		bar.SetCurrent(1)
 		bar.Finish()

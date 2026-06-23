@@ -43,7 +43,7 @@ func Version() error {
 func DownloadExecutable(sternURL string, sternVersion string, bar *pb.ProgressBar) error {
 	localFile := utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
 	if download.IsCurrentVersion(localFile, sternVersion) {
-		bar.SetTemplateString(`{{ green "stern" }} ` + sternVersion + ` already up to date (<1s)`)
+		bar.SetTemplateString(`{{ green "stern" }} ` + sternVersion + ` already up to date`)
 		bar.SetTotal(1)
 		bar.SetCurrent(1)
 		bar.Finish()

@@ -32,7 +32,7 @@ func InstallPlugin(helmPushURI string, helmPushVersion string, bar *pb.ProgressB
 	pluginDir := utils.GetAppDataHome() + sep + "helm" + sep + "plugins" + sep + "helm-push"
 	installedBinary := pluginDir + sep + "bin" + sep + LOCAL_EXECUTABLE_NAME
 	if download.IsCurrentVersion(installedBinary, helmPushVersion) {
-		bar.SetTemplateString(`{{ green "helm-push" }} ` + helmPushVersion + ` already up to date (<1s)`)
+		bar.SetTemplateString(`{{ green "helm-push" }} ` + helmPushVersion + ` already up to date`)
 		bar.SetTotal(1)
 		bar.SetCurrent(1)
 		bar.Finish()

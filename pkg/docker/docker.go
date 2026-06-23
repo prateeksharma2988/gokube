@@ -42,7 +42,7 @@ func Version() error {
 func DownloadExecutable(dockerURL string, dockerVersion string, bar *pb.ProgressBar) error {
 	localFile := utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
 	if download.IsCurrentVersion(localFile, dockerVersion) {
-		bar.SetTemplateString(`{{ green "docker" }} ` + dockerVersion + ` already up to date (<1s)`)
+		bar.SetTemplateString(`{{ green "docker" }} ` + dockerVersion + ` already up to date`)
 		bar.SetTotal(1)
 		bar.SetCurrent(1)
 		bar.Finish()

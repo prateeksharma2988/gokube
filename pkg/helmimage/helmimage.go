@@ -32,7 +32,7 @@ func InstallPlugin(helmImageURI string, helmImageVersion string, bar *pb.Progres
 	pluginDir := utils.GetAppDataHome() + sep + "helm" + sep + "plugins" + sep + "helm-image"
 	installedBinary := pluginDir + sep + "bin" + sep + LOCAL_EXECUTABLE_NAME
 	if download.IsCurrentVersion(installedBinary, helmImageVersion) {
-		bar.SetTemplateString(`{{ green "helm-image" }} ` + helmImageVersion + ` already up to date (<1s)`)
+		bar.SetTemplateString(`{{ green "helm-image" }} ` + helmImageVersion + ` already up to date`)
 		bar.SetTotal(1)
 		bar.SetCurrent(1)
 		bar.Finish()

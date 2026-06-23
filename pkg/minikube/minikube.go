@@ -154,7 +154,7 @@ func Ip() (string, error) {
 func DownloadExecutable(minikubeURL string, minikubeVersion string, bar *pb.ProgressBar) error {
 	localFile := utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
 	if download.IsCurrentVersion(localFile, minikubeVersion) {
-		bar.SetTemplateString(`{{ green "minikube" }} ` + minikubeVersion + ` already up to date (<1s)`)
+		bar.SetTemplateString(`{{ green "minikube" }} ` + minikubeVersion + ` already up to date`)
 		bar.SetTotal(1)
 		bar.SetCurrent(1)
 		bar.Finish()
