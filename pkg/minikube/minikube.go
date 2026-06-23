@@ -31,8 +31,21 @@ const (
 )
 
 // Start ...
-func Start(memory int16, cpus int16, diskSize string, httpProxy string, httpsProxy string, noProxy string, insecureRegistry string, kubernetesVersion string, cache bool, dnsProxy bool, hostDNSResolver bool, dnsDomain string, containerRuntime string, force bool, verbose bool) error {
-	var args = []string{"start", "--kubernetes-version", kubernetesVersion, "--insecure-registry", insecureRegistry, "--memory", strconv.FormatInt(int64(memory), 10), "--cpus", strconv.FormatInt(int64(cpus), 10), "--disk-size", diskSize, "--driver=virtualbox", "--host-only-cidr=192.168.99.1/24"}
+func Start(memory int16, cpus int16, diskSize string, httpProxy string, httpsProxy string, noProxy string, insecureRegistry string, kubernetesVersion string, cache bool, dnsProxy bool, hostDNSResolver bool, dnsDomain string, containerRuntime string, force bool, verbose bool, driver string, hypervVirtualSwitch string) error {
+	var args = []string{"start", "--kubernetes-version", kubernetesVersion, "--insecure-registry", insecureRegistry, "--memory", strconv.FormatInt(int64(memory), 10), "--cpus", strconv.FormatInt(int64(cpus), 10), "--disk-size", diskSize}
+	switch driver {
+	case "hyperv":
+		args = append(args, "--driver=hyperv")
+		// --hyperv-virtual-switch is optional: when empty, minikube auto-selects
+		// a switch (typically the built-in "Default Switch").
+		if len(hypervVirtualSwitch) > 0 {
+			args = append(args, "--hyperv-virtual-switch="+hypervVirtualSwitch)
+		}
+	default:
+		// virtualbox: preserve the original behavior, including the host-only
+		// network used to obtain the expected 192.168.99.100 IP.
+		args = append(args, "--driver=virtualbox", "--host-only-cidr=192.168.99.1/24")
+	}
 	if len(httpProxy) > 0 {
 		args = append(args, "--docker-env=http_proxy="+httpProxy)
 	}

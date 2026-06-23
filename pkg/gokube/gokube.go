@@ -92,7 +92,7 @@ func ReadConfig(verbose bool) error {
 }
 
 // WriteConfig ...
-func WriteConfig(gokubeVersion string, kubernetesVersion string, containerRuntime string) error {
+func WriteConfig(gokubeVersion string, kubernetesVersion string, containerRuntime string, driver string, hypervVirtualSwitch string) error {
 	configPath := utils.GetUserHome() + string(os.PathSeparator) + ".gokube"
 	configFile := "config"
 	configFilePath := configPath + string(os.PathSeparator) + "config.yaml"
@@ -114,6 +114,8 @@ func WriteConfig(gokubeVersion string, kubernetesVersion string, containerRuntim
 	viper.Set("gokube-version", gokubeVersion)
 	viper.Set("kubernetes-version", kubernetesVersion)
 	viper.Set("container-runtime", containerRuntime)
+	viper.Set("minikube-driver", driver)
+	viper.Set("hyperv-virtual-switch", hypervVirtualSwitch)
 	err := viper.WriteConfig()
 	if err != nil {
 		return err
