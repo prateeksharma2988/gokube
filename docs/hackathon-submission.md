@@ -25,6 +25,7 @@ This project delivers five improvements that transform gokube's developer experi
 | **Progress visibility** | One flickering line, no names | 9 stable named bars with status and elapsed time |
 | **Init semantics** | `init -cu` did not purge binaries | All three variants behave correctly and consistently |
 | **`gokube reset` reliability** | Left VM stopped after restore | Always starts the VM after a successful reset |
+| **Hyper-V driver support** | VirtualBox only | `--driver hyperv` adds Hyper-V as an alternative hypervisor |
 
 > **Key outcome**: A warm re-run — the most common case — now completes the dependency check in **under one second** and transfers **zero bytes**. A cold first-run completes in approximately **half the previous time** due to parallel downloads. And `gokube reset` now always leaves the environment in a running, usable state.
 
@@ -70,6 +71,10 @@ The three helm plugins (helm-spray, helm-image, helm-push) had the same uncondit
 
 `gokube init -cu` (clean + upgrade) was supposed to wipe everything and start fresh. In practice, `--clean` only deleted **runtime state** (`~/.minikube`, `~/.kube`, `~/.docker`, `%APPDATA%\helm`) and left the tool binaries and all version metadata untouched. `IsCurrentVersion` returned true for all six main tools and they were silently skipped — making `-cu` effectively equivalent to `-c`.
 
+### 2.7 VirtualBox-Only Architecture
+
+gokube was architected exclusively around VirtualBox (via `VBoxManage`). VM lifecycle operations — snapshots, pause/resume, swap disk attachment, DHCP lease management — were all direct calls to VirtualBox tooling spread across multiple command files. There was no abstraction layer, so adding any alternative hypervisor would have required touching every command file. Developers running Windows machines where Hyper-V was already in use (required by WSL2, Docker Desktop, etc.) could not use VirtualBox alongside Hyper-V, and had no supported path to run gokube at all.
+
 ### 2.8 `gokube reset` Leaves VM Stopped
 
 **Previous behavior**: `gokube reset` checks whether the VM is running before restoring the snapshot. If the VM was running, it stops it, restores the snapshot, then restarts. If the VM was already stopped, it restores the snapshot and silently exits — leaving the user with a restored-but-not-running environment and no indication that they need to run `gokube start` manually.
@@ -97,7 +102,9 @@ if running {
 | Helm plugins not parallelized or cached correctly | Slow, always re-downloaded | **Fixed** |
 | `init -cu` did not purge binaries or metadata | False sense of clean state | **Fixed** |
 | Inflated elapsed time on cached bars | Misleading `(20s)` on instant checks | **Fixed** |
+| Elapsed time keeps growing after 100% | Completed downloads showed increasing timer | **Fixed** |
 | `gokube reset` leaves VM stopped after restore | Silent failure; requires manual `gokube start` | **Fixed** |
+| VirtualBox-only — no path for Hyper-V users | Incompatible with machines that require Hyper-V | **Fixed** |
 
 ---
 
@@ -215,7 +222,34 @@ These improvements are especially valuable in environments with restricted bandw
 
 ---
 
-### 4.8 Bug Fixes
+### 4.8 Hyper-V Driver Support
+
+**Previous behavior**: Every VM lifecycle operation in gokube called VirtualBox tooling (`VBoxManage`) directly. There was no driver abstraction — adding any alternative hypervisor would have required rewriting every command file. Developers whose machines already required Hyper-V (due to WSL2, Docker Desktop, or corporate policy) had no supported path to run gokube.
+
+**New behavior**: A new `pkg/hypervisor` package defines a `Hypervisor` interface covering all host-side VM operations gokube needs. Two implementations exist:
+- `vboxHypervisor` — delegates to the existing `pkg/virtualbox` package; VirtualBox users are unaffected.
+- `hypervHypervisor` — drives Hyper-V via PowerShell (`Get-VM`, `Checkpoint-VM`, `Restore-VMSnapshot`, `Add-VMHardDiskDrive`, etc.).
+
+All subcommands (`init`, `start`, `pause`, `resume`, `save`, `reset`) call `hypervisor.New(resolveDriver())` to obtain the right implementation at runtime.
+
+**New CLI flags on `gokube init`:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--driver` | `virtualbox` | Selects the minikube hypervisor. Also `MINIKUBE_DRIVER` env var. |
+| `--hyperv-virtual-switch` | `""` | Hyper-V only — name of the virtual switch. Omit to let minikube use the Default Switch. Also `MINIKUBE_HYPERV_VIRTUAL_SWITCH`. |
+
+**Pre-flight validation**: Before any destructive VM operation, `initRun` calls `hv.Validate()`. For Hyper-V this verifies the process is running elevated, that Hyper-V is enabled (`Get-VM` is available), and — if a switch name was supplied — that the named switch exists. Failures produce actionable error messages directing the user to the corrective step.
+
+**Configuration persistence**: The chosen driver and virtual switch name are written to `~/.gokube/config.yaml` at the end of `gokube init`. `resolveDriver()` reads the persisted value first, so all subsequent commands automatically use the same driver without any extra flags.
+
+**Driver-specific adaptations**: The VirtualBox host-only DHCP lease reset and the static `--check-ip` enforcement are skipped for Hyper-V (which assigns a dynamic IP via the virtual switch). The swap disk implementation for Hyper-V creates a dynamic VHDX in `~/.minikube/machines/minikube/` and attaches it to the correct controller based on the VM generation (Gen 1 IDE, Gen 2 SCSI). The in-VM device node is detected dynamically rather than assumed.
+
+**Why it matters**: Developers running Windows machines where Hyper-V is required now have a supported, first-class path to use gokube. VirtualBox users are completely unaffected — `virtualbox` remains the default and requires no migration.
+
+---
+
+### 4.9 Bug Fixes
 
 Four bugs were identified and fixed during implementation:
 
@@ -224,7 +258,8 @@ Four bugs were identified and fixed during implementation:
 | `0 [` blank rows at pool start | Bars passed to `StartPool` with no template set; pb/v3 default template with `total=0` renders as `0 [` | Set named template on each bar before calling `StartPool` |
 | Duplicate bar output | `bar.Start()` before `StartPool` spawned an independent render goroutine; pool spawned a second one for the same bars | Never call `bar.Start()` before `StartPool`; confirmed from pb/v3 source |
 | Helm plugin cache always missed | `localFile` in all three `InstallPlugin` functions pointed to plugin root, but binary is installed in `bin/<exe>` | Separated `pluginDir` from `installedBinary` |
-| Inflated elapsed time on cache-hit bars | `pb.startTime` is set at pool-start time for all bars; `{{etime .}}` reads `startTime`, so a tool waiting 20 s for a semaphore slot showed `(20s)` on a < 1 ms cache check | Replaced `{{etime .}}` with static `<1s` in all 9 cache-hit templates |
+| Elapsed time keeps growing after a download reaches 100% | pb/v3 sets `pb.state.time = time.Now()` on every `render()` call — including for finished bars — so `{{etime .}}` keeps increasing until `pool.Stop()` | `fromUrl` uses named returns; a deferred closure freezes the template to `done (Xs)` before `bar.Finish()` on the success path |
+| Inflated elapsed time on cache-hit bars | `pb.startTime` is the pool-start time; `{{etime .}}` on a bar waiting 20 s for a semaphore slot showed `(20s)` despite a < 1 ms check | Removed elapsed time from cache-hit templates entirely — bars now show only `already up to date` |
 
 ---
 
@@ -255,7 +290,7 @@ flowchart TD
     L4 & L5 & L6 --> M
     M --> N[DownloadExecutable\nper tool package]
     N --> O{IsCurrentVersion?}
-    O -->|Yes| P[bar: already up to date ‹1s]
+    O -->|Yes| P[bar: already up to date]
     O -->|No| Q[download.FromUrl\nHTTP + extract]
     Q --> R[WriteVersion\n~/.gokube/metadata/]
     J --> S[wg.Wait · pool.Stop]
@@ -268,7 +303,7 @@ flowchart TD
     W --> X3[goroutine: helm-push]
     X1 & X2 & X3 --> Y[InstallPlugin\nper plugin package]
     Y --> Z{IsCurrentVersion?}
-    Z -->|Yes| AA[bar: already up to date ‹1s]
+    Z -->|Yes| AA[bar: already up to date]
     Z -->|No| AB[download.FromUrl · WriteVersion]
     V --> AC[wg.Wait · pool.Stop]
     AC --> AD[WriteConfig · Done]
@@ -281,7 +316,7 @@ flowchart TD
 ```mermaid
 flowchart LR
     A[DownloadExecutable\ncalled] --> B{binary exists\nAND\nmetadata matches\nversion?}
-    B -->|Cache hit| C[SetTemplate: already up to date ‹1s\nSetTotal 1 · SetCurrent 1 · Finish]
+    B -->|Cache hit| C[SetTemplate: already up to date\nSetTotal 1 · SetCurrent 1 · Finish]
     C --> D[return nil]
     B -->|Cache miss| E[RemoveAll binary\nRemoveAll metadata file]
     E --> F[download.FromUrl\nHTTP GET · extract archive]
@@ -345,9 +380,13 @@ Three approaches were evaluated:
 
 Only three plugins exist, all running simultaneously. A semaphore would add complexity with no benefit at this count. If a fourth plugin is added, the pattern is easy to extend.
 
-#### Static `<1s` over `{{etime .}}` for cache hits
+#### Elapsed time: frozen on download completion, absent on cache hits
 
-`pb.startTime` in pb/v3 is set lazily on the first `bar.render()` call from the pool — at `StartPool` time for all bars simultaneously. `{{etime .}}` computes `state.Time().Sub(pb.startTime)`, which equals the total pool age, not the individual check duration. A tool waiting 20 s for a semaphore slot before a cache hit would display `(20s)` despite the check taking < 1 ms. The only public reset path is `bar.Start()`, which spawns a competing render goroutine. The fix is a static literal — `<1s` — embedded in the template string, bypassing `pb.startTime` entirely.
+**Root cause (confirmed from pb/v3 v3.1.7 source)**: `bar.render()` sets `pb.state.time = time.Now()` on every call, unconditionally. `{{etime .}}` computes `state.Time().Sub(pb.startTime)` — the current wall clock minus the pool-start time. After `bar.Finish()`, the pool continues calling `render()`, so a completed download keeps showing an ever-increasing timer until `pool.Stop()` fires after the slowest goroutine.
+
+**Fix for active downloads**: `fromUrl` uses named returns `(n int64, retErr error)`. A single deferred closure checks `retErr` at return time. On success it computes `time.Since(dlStart)` — where `dlStart` is set after HTTP headers arrive, before body transfer begins — replaces the template with a static `` `done (Xs)` `` string, then calls `bar.Finish()`. The pool re-renders the frozen string; no `{{etime .}}` means no further updates. Error paths just call `bar.Finish()` without modifying the template.
+
+**Fix for cache hits**: The prior workaround was a static `(<1s)` literal embedded in the template to avoid pool-age inflation. With the active-download fix in place, and because a version check takes microseconds, the time suffix has been removed entirely. Cache-hit bars show only `already up to date` — concise and accurate.
 
 #### `upgradeDependencies()` unconditional
 
@@ -362,21 +401,29 @@ Making the dependency check always run (not gated on `-u`) makes `gokube init` s
 | Component | File | Change |
 |---|---|---|
 | Module dependencies | `go.mod`, `go.sum` | Replace `gopkg.in/cheggaaa/pb.v2 v2.0.7` with `github.com/cheggaaa/pb/v3 v3.1.7` |
-| Download engine | `pkg/download/download.go` | Add `VersionFile`, `IsCurrentVersion`, `WriteVersion`, `DeleteAllMetadata`; thread `*pb.ProgressBar`; add `{{etime .}}` to active-download template |
+| Download engine | `pkg/download/download.go` | Add `VersionFile`, `IsCurrentVersion`, `WriteVersion`, `DeleteAllMetadata`; thread `*pb.ProgressBar`; named-return defer freezes template to `done (Xs)` on download success |
 | Utilities | `pkg/utils/utils.go` | Update pb import path |
 | Orchestration | `pkg/gokube/gokube.go` | Rewrite `UpgradeDependencies` (parallel + pool); rewrite `UpgradeHelmPlugins` (parallel + own pool); add `DeleteAllExecutables()` |
-| minikube wrapper | `pkg/minikube/minikube.go` | `DownloadExecutable`: cache check, cache-hit bar `<1s`, metadata write; `DeleteExecutable`: metadata cleanup |
+| minikube wrapper | `pkg/minikube/minikube.go` | `DownloadExecutable`: cache check, cache-hit bar (no time), metadata write; `DeleteExecutable`: metadata cleanup |
 | helm wrapper | `pkg/helm/helm.go` | Same pattern |
 | docker wrapper | `pkg/docker/docker.go` | Same pattern |
 | kubectl wrapper | `pkg/kubectl/kubectl.go` | Same pattern |
 | stern wrapper | `pkg/stern/stern.go` | Same pattern |
 | k9s wrapper | `pkg/k9s/k9s.go` | Same pattern |
-| helm-spray plugin | `pkg/helmspray/helmspray.go` | `pluginDir`/`installedBinary` split; `*pb.ProgressBar` param; cache-hit `<1s`; metadata cleanup + write |
+| helm-spray plugin | `pkg/helmspray/helmspray.go` | `pluginDir`/`installedBinary` split; `*pb.ProgressBar` param; cache-hit bar (no time); metadata cleanup + write |
 | helm-image plugin | `pkg/helmimage/helmimage.go` | Same pattern |
 | helm-push plugin | `pkg/helmpush/helmpush.go` | Same pattern |
 | Init command | `cmd/gokube/cmd/init.go` | `upgradeDependencies()` + `upgradeHelmPlugins()` unconditional; `DeleteAllExecutables()` in clean block; `checkMinimumRequirements()` unconditional |
-| Reset command | `cmd/gokube/cmd/reset.go` | Always call `start()` after successful restore; add state-aware messages for running and stopped paths |
-| Git config | `.gitignore` | Add `cmd/gokube/gokube.exe` and `cmd/gokube/go` |
+| Reset command | `cmd/gokube/cmd/reset.go` | Always call `start()` after successful restore; replace `virtualbox.*` calls with `hv.*` |
+| Pause / resume / save commands | `cmd/gokube/cmd/pause.go`, `resume.go`, `save.go` | Replace `virtualbox.*` calls with `hv.*` |
+| Swap helpers | `cmd/gokube/cmd/swap.go` | New file — `listMinikubeDisks`, `detectNewSwapDevice`, `formatAndEnableSwap` |
+| Hypervisor abstraction | `pkg/hypervisor/hypervisor.go` | New — `Hypervisor` interface, `New` factory, error sentinels |
+| Hyper-V implementation | `pkg/hypervisor/hyperv.go` | New — PowerShell-backed implementation with pre-flight validation |
+| VirtualBox shim | `pkg/hypervisor/virtualbox.go` | New — delegates to `pkg/virtualbox`; translates error sentinels |
+| PowerShell helper | `pkg/hypervisor/powershell.go` | New — `runPowerShell` |
+| Elevation check | `pkg/hypervisor/elevation_windows.go`, `elevation_other.go` | New — `isElevated()` for Windows; stub for other platforms |
+| minikube wrapper | `pkg/minikube/minikube.go` | `Start` gains `driver` + `hypervVirtualSwitch` params; switch statement for driver-specific args; `DownloadExecutable` gains bar + cache |
+| Git config | `.gitignore` | Add `cmd/gokube/gokube.exe`, `cmd/gokube/go`, root-level `gokube.exe` |
 
 ### New Functions
 
@@ -410,8 +457,8 @@ Making the dependency check always run (not gated on `-u`) makes `gokube init` s
 | Concurrent output | One flickering, shared terminal row | One stable row per tool |
 | Tool identification | None visible | Tool name + version on every row |
 | Waiting tools | No output until download starts | `kubectl v1.35.0 waiting to start...` |
-| Cache hits | N/A (always downloaded) | `helm v3.20.0 already up to date (<1s)` |
-| Active downloads | Single bar, no name | `minikube v1.38.0: 45% [=====>  ] 68 MiB/s 9s` |
+| Cache hits | N/A (always downloaded) | `helm v3.20.0 already up to date` |
+| Active downloads | Single bar, no name | `minikube v1.38.0: 45% [=====>  ] 68 MiB/s 9s` → `minikube v1.38.0 done (14s)` (frozen at completion) |
 
 ### Cold first-run terminal output (illustrative)
 
@@ -427,12 +474,12 @@ k9s      0.50.18: waiting to start...
 ### Warm re-run terminal output
 
 ```
-minikube v1.38.0  already up to date (<1s)
-helm     v3.20.0  already up to date (<1s)
-docker   29.2.1   already up to date (<1s)
-kubectl  v1.35.0  already up to date (<1s)
-stern    1.33.1   already up to date (<1s)
-k9s      0.50.18  already up to date (<1s)
+minikube v1.38.0  already up to date
+helm     v3.20.0  already up to date
+docker   29.2.1   already up to date
+kubectl  v1.35.0  already up to date
+stern    1.33.1   already up to date
+k9s      0.50.18  already up to date
 ```
 
 ---
@@ -449,7 +496,8 @@ k9s      0.50.18  already up to date (<1s)
 | Partial failure retry | Full re-download (~300 MB) | **Only failed tools** | Metadata written per tool on success |
 | Version bump (1 tool) | Full re-download (~300 MB) | **Single tool only** | Per-tool version check |
 | Tools visible before download starts | 0 (blank until download begins) | **All 9** | Pre-set `waiting to start...` template on each bar |
-| Cache-hit elapsed time display | N/A | **< 1s** (static, correct) | `{{etime .}}` replaced with `<1s` to avoid pool-age inflation |
+| Cache-hit elapsed time display | N/A | **None** — shows `already up to date` only | Time removed entirely; no meaningful duration to show |
+| Active download elapsed time | N/A (sequential, no pool) | **Frozen at completion** `done (Xs)` | Named-return defer in `fromUrl` freezes template before `bar.Finish()` |
 
 ---
 
@@ -468,7 +516,7 @@ The pb/v3 pool API has non-obvious behaviour that required reading library sourc
 - `bar.render()` lazily initialises bar state on its first call. Pre-set templates render correctly without any `Start()` call.
 - `pb.startTime` is set at the first `render()` call (pool-start time), not when the goroutine starts work. `{{etime .}}` on cache-hit bars therefore shows pool age, not check duration. No public API resets this without triggering the duplicate-output bug.
 
-Each of these issues was diagnosed from source and fixed with a targeted, minimal change.
+Each of these issues was diagnosed from source and fixed with a targeted, minimal change. A fifth issue — the active-download elapsed time continuing to grow after a bar reaches 100% — was subsequently found via the same method: `pb.go:466` shows `pb.state.time = time.Now()` set unconditionally on every `render()` call. The fix uses named returns in `fromUrl` so a deferred closure freezes the template to a static `done (Xs)` string at the moment of success before calling `bar.Finish()`.
 
 ### Challenge 3 — Helm Plugin Binary Path Bug
 
@@ -493,13 +541,14 @@ The project has no automated test suite (`go test ./...` finds nothing). All val
 | **Build** | `cd cmd/gokube && go build` | Clean build, no errors |
 | **Vet** | `go vet ./...` | No issues |
 | **Cold cache — first run** | `gokube init` on machine with no `~/.gokube/metadata/` | All 9 tools downloaded; metadata files written; parallel bars visible |
-| **Warm cache — re-run** | `gokube init` immediately after a successful first run | All 9 bars show `already up to date (<1s)`; no HTTP requests; total < 1 s |
+| **Warm cache — re-run** | `gokube init` immediately after a successful first run | All 9 bars show `already up to date`; no HTTP requests; total < 1 s |
 | **Partial failure retry** | Kill network mid-download; re-run | Only failed tools re-downloaded; previously completed tools show cache hits |
 | **Version bump** | Change one `DEFAULT_*_VERSION` constant; re-run | Only the modified tool re-downloads |
 | **`gokube init -cu`** | Run after a successful first run | All binaries deleted; all metadata deleted; all 9 tools re-downloaded from scratch |
 | **`gokube init -u`** | Run after a successful first run | Identical to plain init; all cache hits |
 | **Helm plugin cache** | Verify helm-spray/helm-image/helm-push cache after first install | All three show cache hits on second run; parallel bars visible |
-| **Inflated etime** | Check cache-hit bar timing after a slow download in the first batch | Cache-hit bars show `<1s`; no inflated pool-age time |
+| **Elapsed time — cache hits** | Check bar display after a slow download in the first batch | Cache-hit bars show `already up to date` with no time suffix |
+| **Elapsed time — active downloads** | Check elapsed time on a bar after it reaches 100% | Bar freezes to `done (Xs)` at completion; does not keep counting |
 | **Windows compatibility** | Build and run on Windows (target platform) | Expected: `windows/amd64` is the only supported target; cross-compile confirmed by CI |
 
 ---
@@ -515,10 +564,14 @@ The project has no automated test suite (`go test ./...` finds nothing). All val
 - [x] Helm plugin parallelization with dedicated 3-bar pool
 - [x] Correct `gokube init` / `init -u` / `init -cu` semantics
 - [x] `DeleteAllExecutables()` and `DeleteAllMetadata()` helpers for clean purge
-- [x] Elapsed time on active-download bars (`{{etime .}}`)
-- [x] Static `<1s` on cache-hit bars (pb/v3 startTime inflation fix)
+- [x] Elapsed time on active-download bars — frozen to `done (Xs)` at completion via named-return defer
+- [x] Cache-hit bars show `already up to date` with no time suffix
 - [x] `.gitignore` updated for build artifacts
 - [x] Four pb/v3 bugs identified and fixed
+- [x] Hyper-V driver support via `pkg/hypervisor` abstraction layer
+- [x] `--driver` and `--hyperv-virtual-switch` CLI flags with env var and config persistence
+- [x] Pre-flight validation for Hyper-V (elevation, feature enabled, optional switch)
+- [x] All VM lifecycle commands (pause/resume/save/reset/start) routed through `Hypervisor` interface
 
 ### Out of Scope / Future Work
 
