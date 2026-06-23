@@ -1,2 +1,4 @@
 vendor/
 .idea/
+cmd/gokube/gokube.exe
+cmd/gokube/go
