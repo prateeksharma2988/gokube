@@ -21,7 +21,7 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
-	"gopkg.in/cheggaaa/pb.v2"
+	pb "github.com/cheggaaa/pb/v3"
 	"io"
 	"os"
 	"os/exec"

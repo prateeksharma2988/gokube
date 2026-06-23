@@ -16,6 +16,7 @@ package k9s
 
 import (
 	"fmt"
+	pb "github.com/cheggaaa/pb/v3"
 	"github.com/gemalto/gokube/pkg/utils"
 	"os"
 	"os/exec"
@@ -39,20 +40,27 @@ func Version() error {
 }
 
 // DownloadExecutable ...
-func DownloadExecutable(k9sURL string, k9sVersion string) error {
+func DownloadExecutable(k9sURL string, k9sVersion string, bar *pb.ProgressBar) error {
 	localFile := utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
-	if _, err := os.Stat(localFile); os.IsNotExist(err) {
-		fileMap := &download.FileMap{Src: LOCAL_EXECUTABLE_NAME, Dst: LOCAL_EXECUTABLE_NAME}
-		_, err = download.FromUrl(k9sURL, k9sVersion, "k9s", []*download.FileMap{fileMap}, filepath.Dir(localFile))
-		if err != nil {
-			return err
-		}
+	if download.IsCurrentVersion(localFile, k9sVersion) {
+		bar.SetTemplateString(`{{ green "k9s" }} ` + k9sVersion + ` already up to date (<1s)`)
+		bar.SetTotal(1)
+		bar.SetCurrent(1)
+		bar.Finish()
+		return nil
 	}
-	return nil
+	_ = os.RemoveAll(localFile)
+	_ = os.RemoveAll(download.VersionFile(localFile))
+	fileMap := &download.FileMap{Src: LOCAL_EXECUTABLE_NAME, Dst: LOCAL_EXECUTABLE_NAME}
+	if _, err := download.FromUrl(k9sURL, k9sVersion, "k9s", []*download.FileMap{fileMap}, filepath.Dir(localFile), bar); err != nil {
+		return err
+	}
+	return download.WriteVersion(localFile, k9sVersion)
 }
 
 // DeleteExecutable ...
 func DeleteExecutable() error {
 	localFile := utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
+	_ = os.RemoveAll(download.VersionFile(localFile))
 	return os.RemoveAll(localFile)
 }

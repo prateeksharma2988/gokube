@@ -248,9 +248,7 @@ func initRun(cmd *cobra.Command, args []string) error {
 		askForUpgrade = true
 	}
 
-	if !askForUpgrade {
-		checkMinimumRequirements()
-	}
+	checkMinimumRequirements()
 
 	// Resolve the hypervisor for the requested driver and fail fast if the host
 	// is not ready (e.g. Hyper-V not enabled, not running elevated, switch
@@ -306,16 +304,15 @@ func initRun(cmd *cobra.Command, args []string) error {
 		_ = docker.DeleteWorkingDirectory()
 		_ = docker.InitWorkingDirectory()
 		_ = helm.DeleteWorkingDirectory()
+		gokube.DeleteAllExecutables()
 	} else if !keepVM {
 		_ = helm.ResetWorkingDirectory()
 	}
 
-	if askForUpgrade {
-		fmt.Println("Upgrading gokube dependencies...")
-		err = upgradeDependencies()
-		if err != nil {
-			return err
-		}
+	fmt.Println("Checking gokube dependencies...")
+	err = upgradeDependencies()
+	if err != nil {
+		return err
 	}
 
 	if !keepVM {
@@ -396,12 +393,9 @@ func initRun(cmd *cobra.Command, args []string) error {
 
 	}
 
-	if askForUpgrade {
-		fmt.Println("Upgrading helm plugins...")
-		err := upgradeHelmPlugins()
-		if err != nil {
-			return err
-		}
+	fmt.Println("Checking helm plugins...")
+	if err := upgradeHelmPlugins(); err != nil {
+		return err
 	}
 
 	// Keep kubernetes version in a persistent file to remember the right kubernetes version to set for (re)start command
