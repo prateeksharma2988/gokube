@@ -4,7 +4,8 @@
 **Integration branch:** `prateeksharma2988/gokube:master`  
 **Go version:** 1.23.0  
 **Target platform:** Windows / amd64  
-**Total changes:** 37 files · +3,171 / −303 lines · 0 new external dependencies
+**Total changes (gokube):** 37 files · +3,171 / −303 lines · 0 new external dependencies  
+**Additional fix:** [ThalesGroup/helm-spray](https://github.com/ThalesGroup/helm-spray) — 2 files · +137 lines (Issue #93)
 
 ---
 
@@ -20,7 +21,7 @@
 
 ### Context
 
-gokube is a Windows-only CLI that bootstraps a Kubernetes development environment on a laptop. It downloads and orchestrates six runtime dependencies (minikube, docker, helm, kubectl, stern, k9s) and three helm plugins (helm-spray, helm-image, helm-push), then provisions a VirtualBox- or Hyper-V-backed minikube VM with ChartMuseum, the miniapps helm repo, and the Kubernetes dashboard preconfigured.
+gokube is a Windows-only CLI tool that bootstraps a Kubernetes development environment on a laptop. It downloads and orchestrates six runtime dependencies (minikube, docker, helm, kubectl, stern, k9s) and three helm plugins (helm-spray, helm-image, helm-push), then provisions a VirtualBox- or Hyper-V-backed minikube VM with ChartMuseum, the miniapps helm repository, and the Kubernetes dashboard preconfigured.
 
 The typical developer workflow is:
 
@@ -30,32 +31,51 @@ gokube start/stop  # daily VM lifecycle
 gokube save/reset  # snapshot and restore known-good state
 ```
 
-Because `gokube init` is the entry point for every developer, its performance and reliability directly affect how quickly a team member reaches a working Kubernetes environment. Before this hackathon, `init` had compounding deficiencies that turned a routine operation into a slow, fragile, and confusing experience.
+Because `gokube init` is the entry point for every developer on the team, its performance and reliability directly affect how long it takes to get from zero to a working Kubernetes environment.
 
 ---
 
 ### Problem to Solve
 
-**1. Sequential dependency downloads — 3–10 minutes per run**  
-All nine dependencies downloaded one after another. Total time was the sum of all nine. On a corporate network, this meant 3–10 minutes of blocked progress per invocation — including re-runs where nothing had changed.
+Before this hackathon, `gokube init` had several compounding deficiencies:
 
-**2. No download cache — unconditional re-downloads**  
-`UpgradeDependencies` called `DeleteExecutable()` before every `DownloadExecutable()`, making the `os.IsNotExist` guard inside permanently dead code. Every `gokube init --upgrade` re-downloaded all nine tools (~300–400 MB) regardless of version changes.
+**1. Sequential dependency downloads (3–10 minutes per run)**
+All nine dependencies downloaded one after another. Total time was the sum of all nine, not the maximum. On a corporate network with proxy throttling, this meant 3–10 minutes of blocked progress on every invocation — including re-runs where nothing had changed.
 
-**3. Broken progress bar UX with concurrent downloads**  
-`gopkg.in/cheggaaa/pb.v2` had no multi-bar pool API. With concurrent downloads, all bars shared a single terminal row, producing unreadable flickering output. There was no tool identification, no queued-download state, and elapsed timers reflected pool start time rather than per-download time.
+**2. No download cache — unconditional re-downloads**
+`UpgradeDependencies` called `DeleteExecutable()` before every `DownloadExecutable()`. The `os.IsNotExist` guard inside `DownloadExecutable` was permanently dead code. Every `gokube init --upgrade` re-downloaded all six tool binaries (~300–400 MB) regardless of whether any version had changed.
 
-**4. Helm plugins not integrated with progress pool**  
-The three helm plugins ran sequentially after the six main tools with standalone bars and no named waiting state. A binary path bug caused the version cache to always miss, forcing full re-downloads on every run.
+**3. Broken progress bar UX with concurrent downloads**
+The original library (`gopkg.in/cheggaaa/pb.v2`) had no multi-bar pool API. With concurrent downloads, all bars shared a single terminal row, interleaving over each other and producing an unreadable flickering line. There was no tool identification, no waiting state for queued downloads, and elapsed timers were inflated by pool-start time rather than per-download time.
 
-**5. Broken `init` / `init -u` / `init -cu` semantics**  
-Plain `init` skipped the dependency check on non-first runs, leaving missing binaries unrecovered. `init -cu` deleted runtime state but left tool binaries and metadata intact — `IsCurrentVersion` returned true for all tools, making `-cu` effectively equivalent to `-c`.
+**4. Helm plugins not integrated with progress pool**
+The three helm plugins (helm-spray, helm-image, helm-push) ran sequentially after the six main tools, each with a standalone progress bar and no named waiting state. A critical bug caused the version cache check to always miss, forcing a full re-download of all three plugins on every run.
 
-**6. `gokube reset` leaving VM stopped after restore**  
-When the VM was stopped before reset, the snapshot restored successfully but the command exited silently, leaving the VM in a stopped state with no message directing the developer to run `gokube start`.
+**5. Confusing `init` / `init -u` / `init -cu` semantics**
+- `gokube init` (without `--upgrade`) skipped the dependency check entirely on non-first runs, meaning missing binaries were not recovered automatically.
+- `gokube init -cu` (clean + upgrade) deleted runtime state directories but left tool binaries and all version metadata intact. `IsCurrentVersion` returned true for all tools, so nothing re-downloaded — making `-cu` effectively equivalent to `-c`.
 
-**7. VirtualBox-only workflow**  
-All VM lifecycle operations were hard-coded against VirtualBox (`VBoxManage`). Developers whose machines required Hyper-V (WSL2, Docker Desktop, corporate policy) had no supported path to run gokube.
+**6. `gokube reset` leaving VM stopped after restore**
+If the VM was stopped before `gokube reset`, the snapshot restored successfully but the command exited silently, leaving the VM in a stopped state. The user had to manually run `gokube start` — with no message explaining this was necessary. The recovery command did not produce a recoverable state.
+
+**7. VirtualBox-only workflow**
+All VM lifecycle operations (snapshots, pause/resume, swap disk attachment, DHCP lease management) were hard-coded against VirtualBox tooling (`VBoxManage`). There was no abstraction layer. Developers on machines where Hyper-V was already required (WSL2, Docker Desktop, corporate policy) had no supported path to run gokube.
+
+**8. helm-spray incompatible with Helm 3 strict JSON Schema validation**
+`helm-spray` injects a `weight` key into each subchart's `values.yaml` to determine deployment-wave ordering. Helm 3 validates the fully coalesced values document against any declared `values.schema.json` before deployment begins. When a chart enforces `additionalProperties: false` — a recommended practice for multi-team chart governance — Helm rejects `weight` as an undeclared property with `Additional property weight is not allowed`. Teams using strict schema validation had no way to use `helm spray` for ordered rollouts without weakening or abandoning their schema.
+
+---
+
+### Why It Matters
+
+The combined effect of these problems was significant developer friction:
+
+- A developer re-running `gokube init` after a VM reset waited 3–10 minutes and received no useful feedback during that time.
+- A partial failure (network drop, VirtualBox error) discarded all completed downloads and required a full restart from scratch.
+- Developers who needed Hyper-V could not use gokube at all.
+- The recovery command (`gokube reset`) did not reliably deliver a ready-to-use environment.
+
+These are not edge cases — they affect every developer using gokube on every re-initialization.
 
 ---
 
@@ -70,7 +90,7 @@ All VM lifecycle operations were hard-coded against VirtualBox (`VBoxManage`). D
 | Named waiting-state progress bars | All 9 tools visible from first second |
 | Frozen elapsed time on completed bars | `done (Xs)` via named-return defer |
 | Cache-hit progress display | Clean `already up to date` — no inflated timer |
-| `init` semantic correction | Unconditional dependency check |
+| `init` semantic correction | Always-unconditional dependency check |
 | `init -cu` semantic correction | Full binary + metadata purge before re-download |
 | `gokube reset` reliability | Always starts VM after successful restore |
 | Hyper-V driver support | `--driver hyperv` as VirtualBox alternative |
@@ -78,6 +98,7 @@ All VM lifecycle operations were hard-coded against VirtualBox (`VBoxManage`). D
 | Pre-flight validation | Elevation, Hyper-V enabled, virtual switch existence |
 | Driver configuration persistence | Driver choice survives across all commands |
 | Documentation | CLAUDE.md, hackathon docs |
+| helm-spray schema validation fix | Strip `weight` before Helm validates; two-layer fix in `ThalesGroup/helm-spray` (Issue #93) |
 
 ---
 
@@ -85,40 +106,39 @@ All VM lifecycle operations were hard-coded against VirtualBox (`VBoxManage`). D
 
 | Item | Reason |
 |---|---|
-| Automatic Hyper-V / VirtualBox detection | Requires host state probing; deferred |
-| WSL2 driver support | Pre-existing `TODO` in codebase; independent work |
-| `--download-concurrency` CLI flag | One-integer constant change; not prioritised |
-| Download retry on transient failures | Deferred to future work |
-| Image preloading cache | Requires minikube image API integration |
-| Automated test suite | No existing test infrastructure |
-| JSON manifest with per-tool checksums | High per-release maintenance cost |
+| Automatic Hyper-V / VirtualBox detection | Requires probing host state; deferred to future work |
+| Download retry on transient failures | Wrapping `fromUrl`; deferred to future work |
+| Automated test suite | gokube has no test infrastructure; would require significant investment |
 
 ---
 
 ### Assumptions
 
-- Semaphore cap of 3 concurrent downloads is appropriate for corporate proxy environments; tunable by changing a single constant.
-- The ~50% first-run speedup estimate is based on architectural analysis (wall-clock ≈ max(batch1, batch2)), not measured timing.
-- `--check-ip` fixed IP (`192.168.99.100`) is VirtualBox-specific; Hyper-V assigns a dynamic IP via the virtual switch.
+- The semaphore cap of 3 concurrent downloads is appropriate for corporate proxy environments. It was not benchmarked against real proxy limits and can be adjusted by changing one constant.
+- The ~50% first-run speedup estimate is based on architectural analysis (parallel execution → wall-clock ≈ max(batch1, batch2)) rather than measured timing.
+- The `--check-ip` constraint (fixed IP `192.168.99.100`) is VirtualBox-specific and does not apply to Hyper-V, which assigns a dynamic IP via the virtual switch.
 - Swap disk support on Hyper-V is experimental, as documented in README and CHANGELOG.
 
 ---
 
 ## Section 3 — Use Cases Delivered
 
+---
+
 ### Use Case 1 — Parallel Dependency Downloads
 
-**Problem**  
-Downloads ran sequentially — 3–10 minutes blocked per `gokube init` run. A single network failure required restarting all downloads from scratch, including tools that had already completed.
+**Description**  
+A developer running `gokube init` on a machine with no tools installed, or with version-outdated tools, should not wait for each download to finish before the next begins. All downloads that can proceed concurrently should do so, subject to a connection cap that respects corporate proxy limits.
 
-**Solution**  
-`UpgradeDependencies` in `pkg/gokube/gokube.go` was rewritten to launch six goroutines concurrently, capped at three simultaneous HTTP connections via a buffered channel semaphore. A `WaitGroup` blocks until all six finish; a `Mutex`-guarded `firstErr` captures failures race-free. All downloads always run to completion even if one fails, maximising the number of cached results available for faster retries.
+**Expected Outcome**  
+Total download time for six tools drops from the sum of six sequential downloads to approximately the maximum of two batches of three — a ~50% reduction on typical corporate networks.
 
-**Impact**  
-Wall-clock time drops to approximately `max(batch1_time, batch2_time)` — an estimated ~50% reduction on typical corporate networks. A partial failure no longer discards completed downloads.
+**What Was Implemented**
+
+`UpgradeDependencies` in `pkg/gokube/gokube.go` was rewritten. Six goroutines launch immediately. A buffered channel `sem := make(chan struct{}, 3)` acts as a semaphore — each goroutine must acquire a slot before starting its HTTP fetch, limiting concurrent connections to three. A `sync.WaitGroup` blocks until all six complete. A `sync.Mutex`-guarded `firstErr` variable captures the first non-nil error without race conditions. All six downloads always run to completion even if one fails, maximising the number of metadata files written for a faster retry.
 
 ```
-Cold first-run terminal output:
+Terminal output (cold first-run):
 minikube v1.38.0: 45% [=========>          ]  8.2 MiB/s  9s
 helm     v3.20.0: 100% [==================]  9.1 MiB/s  done (2s)
 docker   29.2.1:  28% [======>             ]  5.5 MiB/s  6s
@@ -131,98 +151,126 @@ k9s      0.50.18: waiting to start...
 
 ### Use Case 2 — Download Cache with Version Validation
 
-**Problem**  
-Every `gokube init --upgrade` unconditionally deleted and re-downloaded all nine tools (~300–400 MB), even when no versions had changed.
+**Description**  
+A developer re-running `gokube init` after a version that was already installed should not transfer any data. The tool should detect that each binary is current and skip the download entirely.
 
-**Solution**  
-After each successful download, a metadata file is written to `~/.gokube/metadata/<toolname>.version`. Before any download, `IsCurrentVersion(binaryPath, version)` checks binary existence and version match. On a hit, the bar completes immediately with no HTTP traffic. On a miss, the binary and its metadata file are deleted before re-downloading; `WriteVersion` is called only on success.
+**Expected Outcome**  
+- Warm re-run: all 9 tools confirmed in under one second, 0 bytes transferred.
+- Partial failure retry: only the tools that failed re-download; previously completed tools are served from cache.
+- Version bump: only the changed tool(s) re-download.
+
+**What Was Implemented**
+
+After each successful download, a metadata file is written to `~/.gokube/metadata/<toolname>.version` containing the version string. Before any download, `download.IsCurrentVersion(binaryPath, version)` checks that the binary exists on disk and the metadata file content matches the requested version. On a hit, the bar is marked complete and the function returns immediately. On a miss, the binary and its metadata file are deleted, the download runs, and a new metadata file is written on success.
 
 Three helpers were added to `pkg/download/download.go`:
 
 | Function | Purpose |
 |---|---|
-| `VersionFile(binaryPath)` | Returns `~/.gokube/metadata/<name>.version` |
-| `IsCurrentVersion(path, version)` | Binary exists + metadata version matches |
+| `VersionFile(binaryPath)` | Derives `~/.gokube/metadata/<name>.version` from binary path |
+| `IsCurrentVersion(path, version)` | Binary exists + metadata matches |
 | `WriteVersion(path, version)` | Writes version string; creates directory on first use |
 | `DeleteAllMetadata()` | `os.RemoveAll(~/.gokube/metadata/)` for clean purge |
 
-**Impact**
-
-```
-Warm re-run (all current):              Version bump (one tool changed):
-minikube v1.38.0  already up to date    minikube v1.39.0: [====] done (14s)
-helm     v3.20.0  already up to date    helm     v3.20.0  already up to date
-docker   29.2.1   already up to date    docker   29.2.1   already up to date
-...all 9 complete in < 1 second         ...only changed tool re-downloads
-```
+A partial download (crash before `WriteVersion`) leaves no metadata file, so the next run detects a cache miss and re-downloads correctly. The binary directory stays clean — no version files alongside executables.
 
 ---
 
 ### Use Case 3 — Improved Progress Bar UX
 
-**Problem**  
-With concurrent downloads, pb/v2 bars interleaved onto a single terminal row — unreadable, no tool identification, no queued state. Elapsed timers reflected pool age rather than individual download time, and finished bars kept incrementing after completion.
+**Description**  
+A developer running a parallel download should see one stable terminal row per tool, with the tool name, version, download progress, speed, and a meaningful elapsed time. Queued tools should be visible from the first second, not blank. Completed tools should freeze at their final state and not continue updating their timer.
 
-**Solution**  
-Migrated from `gopkg.in/cheggaaa/pb.v2` to `github.com/cheggaaa/pb/v3` (v3.1.7) and its `StartPool` multi-bar API. Six bars are pre-created with named `waiting to start...` templates before `StartPool` so all tools are visible from the first second. `bar.Start()` is deliberately never called on pooled bars — confirmed from pb/v3 source to spawn a competing render goroutine causing duplicate output.
-
-The elapsed time freeze addresses a pb/v3 internals issue: `bar.render()` sets `state.time = time.Now()` unconditionally on every tick, even for finished bars. The fix uses a named-return defer in `fromUrl` that computes `time.Since(dlStart)` at actual completion, replaces the template with a static `done (Xs)` string, and calls `bar.Finish()` — preventing further ticks from inflating the counter.
-
-**Impact**
+**Expected Outcome**
 
 ```
-Warm re-run:                        Cold download (at completion):
-minikube v1.38.0  already up to date    minikube v1.38.0  done (14s)
-helm     v3.20.0  already up to date    helm     v3.20.0  done (2s)
+Warm re-run:
+minikube v1.38.0  already up to date
+helm     v3.20.0  already up to date
 docker   29.2.1   already up to date
+
+Cold download (tool at completion):
+minikube v1.38.0  done (14s)
+helm     v3.20.0  done (2s)
 ```
+
+**What Was Implemented**
+
+The `gopkg.in/cheggaaa/pb.v2` library was replaced with `github.com/cheggaaa/pb/v3` (v3.1.7), which provides a `StartPool` multi-bar rendering API. Six bars are pre-created before the pool starts, each with a named `waiting to start...` template so all tools are visible immediately. `bar.Start()` is deliberately never called before `StartPool` — doing so spawns a competing render goroutine that causes duplicate output (confirmed from pb/v3 source).
+
+Cache-hit bars set a static template (`already up to date`) with no elapsed time — a cache check is instantaneous and the duration is not meaningful.
 
 ---
 
 ### Use Case 4 — Helm Plugin Progress Integration
 
-**Problem**  
-Helm plugins ran sequentially after the six main tools with standalone bars and no named waiting state. A binary path bug caused the version cache to always miss: `localFile` pointed to the plugin root, but the actual binary installs to `<plugin-root>/bin/<exe>` — causing `IsCurrentVersion` to always return false.
+**Description**  
+The three helm plugins (helm-spray, helm-image, helm-push) should benefit from the same parallel execution, download caching, and named progress bar UX as the six main tools.
 
-**Solution**  
-`UpgradeHelmPlugins` was rewritten with a dedicated 3-bar `pb.StartPool` and concurrent goroutines (no semaphore needed — three plugins, all run simultaneously). Each `InstallPlugin` accepts a `*pb.ProgressBar` and follows the same cache-check → bar-freeze → `Finish` pattern as the main tools. The binary path bug was fixed by separating `pluginDir` (used for `os.RemoveAll` and download destination) from `installedBinary` (`pluginDir/bin/<exe>`, used for version checks and metadata writes).
+**Expected Outcome**  
+All three plugins download concurrently with their own named progress pool. Cache hits complete in under one second and display `already up to date`. Completed downloads freeze at `done (Xs)`.
 
-**Impact**  
-All three plugins download in parallel with named bars. Cache hits complete in under one second. The path fix means the cache actually works — eliminating unnecessary re-downloads on every run.
+**What Was Implemented**
+
+`UpgradeHelmPlugins` in `pkg/gokube/gokube.go` was rewritten with a dedicated 3-bar `pb.StartPool`. All three `InstallPlugin` calls run as concurrent goroutines with a `WaitGroup` and `Mutex` (no semaphore needed — only three plugins, all run simultaneously). Each `InstallPlugin` function accepts a `*pb.ProgressBar` parameter and follows the same cache-check → bar-freeze → `Finish` pattern as the main tools.
+
+A binary path bug was also fixed: all three `InstallPlugin` functions used a `localFile` path pointing to the plugin root directory, but the actual binary is installed to `<plugin-root>/bin/<exe>`. `IsCurrentVersion` always returned false (the file never existed at the checked path), forcing full re-downloads. The fix separates `pluginDir` (used for `os.RemoveAll` and download destination) from `installedBinary` (`pluginDir/bin/<exe>`, used for version checks and metadata).
 
 ---
 
 ### Use Case 5 — Correct `init` / `init -u` / `init -cu` Semantics
 
-**Problem**  
-Plain `init` skipped the dependency check on non-first runs, leaving missing binaries unrecovered. `init -cu` deleted runtime state but left binaries and metadata intact, so `IsCurrentVersion` returned true for all tools — making it identical to `init -c`.
+**Description**  
+The three variants of `gokube init` should behave predictably and as documented. Plain `init` should be self-healing. `init -cu` should produce a clean-slate result equivalent to a fresh machine.
 
-**Solution**  
-Three targeted changes to `cmd/gokube/cmd/init.go`:
-1. `checkMinimumRequirements()` — made unconditional (was gated on `askForUpgrade`).
-2. `upgradeDependencies()` and `upgradeHelmPlugins()` calls — made unconditional.
-3. Clean block — `gokube.DeleteAllExecutables()` added after working directory deletion, which calls `DeleteExecutable()` for all six tools then `download.DeleteAllMetadata()`.
+**Expected Outcome**
 
 | Command | Behaviour |
 |---|---|
-| `gokube init` | Cache-aware check always runs. Self-healing — missing binaries re-downloaded. Cache hits complete in < 1 s. |
+| `gokube init` | Always runs cache-aware check. Cache hits complete in < 1 s. Downloads only missing or outdated tools. Self-healing. |
 | `gokube init -u` | Identical code path. Flag retained for backward compatibility. |
-| `gokube init -cu` | Purges all binaries + `~/.gokube/metadata/`. Forces full re-download of all 9 tools. |
+| `gokube init -cu` | Purges all binaries + `~/.gokube/metadata/` before downloading. Forces full re-download of all 9 tools. |
+
+**What Was Implemented**
+
+Three targeted changes to `cmd/gokube/cmd/init.go`:
+
+1. `checkMinimumRequirements()` made unconditional (was gated on `askForUpgrade`).
+2. `upgradeDependencies()` and `upgradeHelmPlugins()` calls made unconditional (were gated on `askForUpgrade`).
+3. In the `askForClean` block: `gokube.DeleteAllExecutables()` added after working directory deletion. This calls `DeleteExecutable()` for all six main tools and then `download.DeleteAllMetadata()`, ensuring that `IsCurrentVersion` returns false for all nine tools on the next check.
+
+`DeleteAllExecutables()` was introduced in `pkg/gokube/gokube.go` to avoid adding six tool-package imports to `init.go` — the orchestration package already imports all tool packages.
 
 ---
 
 ### Use Case 6 — Reset Reliability Improvement
 
-**Problem**  
-When the VM was stopped before `gokube reset`, the snapshot restored successfully but the command exited silently, leaving the VM stopped with no indication to the developer.
+**Description**  
+`gokube reset` should always leave the environment in a running, usable state after a successful snapshot restore. A developer using reset to recover from a bad state should not need to know or remember whether the VM was running when they triggered the command.
 
-**Solution**  
-`start()` is now called unconditionally after a successful restore. A state-aware message is printed for both pre-reset states:
+**Expected Outcome**
+
+| Pre-reset state | Output | Final state |
+|---|---|---|
+| VM was running | `VM was running before reset, restarting...` | Running |
+| VM was stopped | `VM was stopped before reset, starting after restore...` | Running |
+
+**What Was Implemented**
+
+In `cmd/gokube/cmd/reset.go`, the tail of `resetRun` was:
 
 ```go
 // Before
-if running { return start() } else { return nil }
+if running {
+    return start()
+} else {
+    return nil  // VM stayed stopped with no message
+}
+```
 
+Changed to:
+
+```go
 // After
 if running {
     fmt.Println("VM was running before reset, restarting...")
@@ -232,38 +280,99 @@ if running {
 return start()
 ```
 
-| Pre-reset state | Message | Final state |
-|---|---|---|
-| VM running | `VM was running before reset, restarting...` | Running |
-| VM stopped | `VM was stopped before reset, starting after restore...` | Running |
+`start()` reads `kubernetes-version` and `container-runtime` from the persisted config and calls `minikube.Restart()`. It is safe to call unconditionally after a snapshot restore — the VM is in a well-defined state regardless of pre-reset history.
 
 ---
 
 ### Use Case 7 — Hyper-V Driver Support and Abstraction Layer
 
-**Problem**  
-All VM lifecycle operations were hard-coded against VirtualBox (`VBoxManage`) with no abstraction layer. Developers on machines where Hyper-V was required (WSL2, Docker Desktop, corporate policy) had no supported path to run gokube.
+**Description**  
+Developers on Windows machines where Hyper-V is active (required by WSL2, Docker Desktop, or corporate policy) should be able to use gokube without needing to disable Hyper-V or install VirtualBox. VirtualBox users should be completely unaffected.
 
-**Solution**  
-A new `pkg/hypervisor` package introduces a `Hypervisor` interface covering all host-side VM operations. Two implementations exist: `vboxHypervisor` (delegates to `pkg/virtualbox`) and `hypervHypervisor` (drives Hyper-V via PowerShell). All VM-lifecycle commands resolve the correct implementation once via `hypervisor.New(resolveDriver())`.
+**Expected Outcome**  
+- `gokube init --driver hyperv` provisions a minikube VM on Hyper-V.
+- All VM lifecycle commands (pause, resume, save, reset, start) continue to work with Hyper-V.
+- `gokube init` (no flags) continues to use VirtualBox — no migration required.
+- Driver choice is persisted and automatically reused across all commands.
+- Misconfiguration (not elevated, Hyper-V disabled, bad switch name) is caught before any destructive operation with a clear error message.
+
+**What Was Implemented**
+
+A new `pkg/hypervisor` package defines a `Hypervisor` interface covering all host-side VM operations:
+
+```
+IsRunning, Pause, Resume, TakeSnapshot, DeleteSnapshot, RestoreSnapshot,
+ResetNetworkLeases, ApplyVB7Workaround, AddSwapDisk, Validate
+```
+
+Two implementations:
+- `vboxHypervisor` — delegates to the existing `pkg/virtualbox` package. Error sentinels are translated to the driver-neutral `hypervisor.ErrSnapshotNotExist`.
+- `hypervHypervisor` — drives Hyper-V via PowerShell (`Get-VM`, `Checkpoint-VM`, `Restore-VMSnapshot`, `Add-VMHardDiskDrive`, etc.).
 
 New CLI flags on `gokube init`:
 
 | Flag | Env var | Default | Notes |
 |---|---|---|---|
 | `--driver` | `MINIKUBE_DRIVER` | `virtualbox` | `virtualbox` or `hyperv` |
-| `--hyperv-virtual-switch` | `MINIKUBE_HYPERV_VIRTUAL_SWITCH` | `""` | Omit to use Default Switch |
+| `--hyperv-virtual-switch` | `MINIKUBE_HYPERV_VIRTUAL_SWITCH` | `""` | Optional; omit to use Default Switch |
 
-Pre-flight validation (`Validate()`) for Hyper-V checks in order: (1) process is running elevated, (2) Hyper-V is enabled (`Get-VM` available), (3) if a switch was supplied, it exists. Each failure returns an actionable error message directing the developer to the corrective step.
+Pre-flight validation (`Validate()`) for Hyper-V checks in order:
+1. Process is running elevated (administrator privileges).
+2. `Get-VM` is available — confirms Hyper-V is enabled.
+3. If a switch name was supplied, the named switch exists.
 
-Driver and switch are persisted to `~/.gokube/config.yaml` at the end of `init`. `resolveDriver()` reads the persisted value first, then the `MINIKUBE_DRIVER` env var, then defaults to `virtualbox`. All subsequent commands inherit the choice automatically — no flags required after init.
+Each check produces an actionable error message directing the user to the corrective step.
 
-Driver-specific adaptations included:
-- VirtualBox DHCP lease reset and fixed-IP `--check-ip` enforcement are skipped for Hyper-V (dynamic IP via virtual switch).
-- Swap disk: VHDX created in `~/.minikube/machines/minikube/`; Gen 1 (IDE) vs Gen 2 (SCSI) handled automatically; in-VM device node detected by diffing the disk list before and after attach (replacing the hardcoded `/dev/sdb` assumption).
+Driver persistence: chosen driver and switch name are written to `~/.gokube/config.yaml` at the end of `init`. `resolveDriver()` reads the persisted value first, then the `MINIKUBE_DRIVER` env var, then defaults to `virtualbox`. All subsequent commands call `hypervisor.New(resolveDriver())` automatically.
 
-**Impact**  
-Developers on Hyper-V hosts can run `gokube init --driver hyperv` from an elevated shell for a full Kubernetes environment. VirtualBox users are completely unaffected — no flag required, no migration needed.
+Driver-specific adaptations:
+- VirtualBox host-only DHCP lease reset skipped for Hyper-V (no host-only network).
+- Static `--check-ip` enforcement disabled for Hyper-V (dynamic IP).
+- Swap disk: VHDX created in `~/.minikube/machines/minikube/`; Gen 1 (IDE) vs Gen 2 (SCSI) handled automatically.
+- In-VM swap device node detected dynamically by diffing disk list before and after attach, rather than assumed to be `/dev/sdb`.
+
+### Use Case 8 — helm-spray Schema Validation Fix (Issue #93)
+
+**Description**  
+Any umbrella chart that uses `helm spray` for ordered rollouts and also declares a `values.schema.json` with `additionalProperties: false` should deploy without requiring chart authors to pollute their schema with spray-internal metadata. This is a fix contributed upstream to `ThalesGroup/helm-spray`.
+
+**Expected Outcome**
+
+```
+Before fix:
+$ helm spray --namespace test --create-namespace umbrella-chart
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+umbrella-chart:
+- subchart: Additional property weight is not allowed
+
+After fix:
+$ helm spray --namespace test --create-namespace umbrella-chart
+[spray] processing sub-charts of weight 10
+[spray]   > upgrading release "subchart": deploying first revision...
+[spray]     o release: "subchart" upgraded
+[spray] upgrade of solution chart "umbrella-chart" completed in 2s
+```
+
+**What Was Implemented**
+
+**Root cause:** `helm-spray` reads `<subchart>.weight` from `values.yaml` to compute deployment waves. Helm 3's `chartutil.ValidateAgainstSchema` runs against the full coalesced values document — chart defaults + overlays + `--set` flags — before any deployment. With `additionalProperties: false`, `weight` is rejected as undeclared. This is an architectural conflict: `weight` is out-of-band metadata for helm-spray, but Helm 3 treats `values.yaml` as a single typed contract with no concept of "keys owned by a sidecar tool."
+
+**Two-layer fix** (contained entirely within helm-spray, transparent to chart authors):
+
+**Layer 1 — Strip the overlay** (`internal/values/values.go`):  
+`StripSprayKeys(yamlStr, chrt)` parses the temp YAML overlay file that helm-spray passes via `helm upgrade -f`, removes `<dep>.weight` for each declared dependency, and re-serialises. Idempotent — returns the original string unchanged when nothing was stripped.
+
+**Layer 2 — Sanitise chart defaults** (`pkg/helmspray/helmspray.go`):  
+`materialiseStrippedChart(chrt)` writes a sanitised copy of the chart tree to a temp directory. It mutates `c.Raw[].Data` — the raw bytes of each `values.yaml` — rather than `c.Values` (the parsed map). This distinction is critical: `chartutil.SaveDir` reads from `c.Raw[].Data`, not from `c.Values`; confirmed from helm source `pkg/chartutil/save.go:60–67`. `helm upgrade` is then called with the sanitised temp path instead of the original.
+
+Both layers are required: stripping only the overlay still leaves `weight` in the chart's on-disk `values.yaml`, which Helm reads during coalescing. The sanitisation runs after `dependencies.Get` has already extracted weights into the ordering slice — deployment order is fully preserved.
+
+| File | Change |
+|---|---|
+| `internal/values/values.go` | +47 lines — `StripSprayKeys` helper |
+| `pkg/helmspray/helmspray.go` | +90 lines — `materialiseStrippedChart`, `stripWeightFromRawValues`, updated `upgrade` wiring |
+
+Verified against a synthetic reproducer and the production OTA Cloud umbrella chart (30+ subcharts, `.tgz`-packaged dependencies, `apiVersion: v1` / `requirements.yaml`-driven, `--target` subchart scoping).
 
 ---
 
@@ -299,19 +408,20 @@ gokube init
 | Package | Role | Change |
 |---|---|---|
 | `pkg/gokube` | Orchestration | `UpgradeDependencies` and `UpgradeHelmPlugins` rewritten with goroutines, pools, semaphore; `DeleteAllExecutables` added |
-| `pkg/download` | HTTP fetch + extraction | Cache helpers added; `fromUrl` named-return defer freezes bar on completion |
+| `pkg/download` | HTTP fetch + extraction | Cache helpers added; `fromUrl` uses named-return defer to freeze progress bar on completion |
 | `pkg/hypervisor` | VM abstraction (new) | `Hypervisor` interface + `vboxHypervisor` + `hypervHypervisor` |
-| `cmd/gokube/cmd/init.go` | Init flow | Unconditional checks; clean block purge; `--driver` / `--hyperv-virtual-switch` flags |
+| `cmd/gokube/cmd/init.go` | Init flow | Unconditional checks; clean block purge; `--driver`/`--hyperv-virtual-switch` flags |
 | `cmd/gokube/cmd/reset.go` | Reset flow | Always-start after restore; Hyper-V lifecycle via `hv.*` |
-| `pkg/minikube` | minikube wrapper | `Start` accepts `driver` + `hypervVirtualSwitch`; `DownloadExecutable` gains bar + cache |
+| `pkg/minikube` | minikube wrapper | `Start` accepts `driver` + `hypervVirtualSwitch`; `DownloadExecutable` accepts bar + caches |
 | `pkg/{helm,docker,kubectl,stern,k9s}` | Tool wrappers | `DownloadExecutable` gains bar param + cache check |
 | `pkg/{helmspray,helmimage,helmpush}` | Plugin wrappers | `InstallPlugin` gains bar param + cache check + binary path fix |
+| `helm-spray` (upstream, Issue #93) | Schema compatibility | `internal/values/values.go`: `StripSprayKeys`; `pkg/helmspray/helmspray.go`: `materialiseStrippedChart` + `upgrade` wiring |
 
 ### Concurrency Model
 
 ```go
-// UpgradeDependencies — semaphore-based, 6 tools, cap 3
-sem := make(chan struct{}, 3)   // 3 concurrent HTTP connections
+// Semaphore-based concurrency in UpgradeDependencies
+sem := make(chan struct{}, 3)   // cap: 3 concurrent HTTP connections
 var wg sync.WaitGroup
 var mu sync.Mutex
 var firstErr error
@@ -333,9 +443,9 @@ _ = pool.Stop()
 return firstErr
 ```
 
-All goroutines complete before any error is returned, maximising metadata files written on partial failure. `golang.org/x/sync` is not in `go.mod`; the buffered channel achieves the same cap with zero new imports and a single constant to tune.
+All goroutines complete before any error is returned. This maximises the number of metadata files written on a partial failure — the next retry only downloads what failed.
 
-`UpgradeHelmPlugins` uses the same WaitGroup/Mutex pattern without a semaphore — only three plugins, all run simultaneously.
+`UpgradeHelmPlugins` uses the same WaitGroup/Mutex pattern without a semaphore: only three plugins, all run simultaneously.
 
 ### Caching Approach
 
@@ -354,41 +464,41 @@ All goroutines complete before any error is returned, maximising metadata files 
     helm-cm-push.version       ← "0.10.4"
 ```
 
-Design decisions:
-- **Per-tool independent files**: no mutex needed for concurrent writes — each goroutine writes only its own file.
-- **Separate `~/.gokube/metadata/` directory**: keeps binary directory clean; natural home alongside the existing `config.yaml`.
-- **Version string only** (not SHA256): zero per-release maintenance cost; SHA256 would require retrieving hashes from six different upstream release pages each version bump.
+Decision rationale:
+- **Per-tool independent files** (not a single JSON manifest): no mutex needed for concurrent writes; each goroutine writes only its own file.
+- **Separate `~/.gokube/metadata/` directory** (not sidecar files alongside binaries): keeps the binary directory clean; natural home alongside the existing `config.yaml`.
+- **Version string only** (not SHA256): zero maintenance cost per release; SHA256 would require retrieving hashes from six different upstream release pages each version bump.
 
 ### Driver Abstraction
 
 ```
-         +------------------+
-         |   Hypervisor     |  interface
-         |  (hypervisor.go) |
-         +--------+---------+
-                  |
-    +-------------+-------------+
-    |                           |
-+-----------------+   +------------------+
-| vboxHypervisor  |   | hypervHypervisor |
-| (virtualbox.go) |   |   (hyperv.go)    |
-+-----------------+   +------------------+
-        |                      |
- pkg/virtualbox             PowerShell
- (VBoxManage)            (Hyper-V module)
+                 +------------------+
+                 |   Hypervisor     |  interface
+                 |  (hypervisor.go) |
+                 +--------+---------+
+                          |
+            +-------------+-------------+
+            |                           |
+  +---------+--------+        +---------+--------+
+  |  vboxHypervisor  |        | hypervHypervisor |
+  | (virtualbox.go)  |        |   (hyperv.go)    |
+  +------------------+        +------------------+
+         |                            |
+  pkg/virtualbox                  PowerShell
+  (VBoxManage)                  (Hyper-V module)
 ```
 
-The interface is resolved once per command via `hypervisor.New(resolveDriver())`. Adding a third driver (e.g., WSL2) requires implementing the interface and adding one `case` to `New()` — no existing command files need modification.
+The interface is resolved once per command via `hypervisor.New(resolveDriver())`. Adding a third driver (e.g., WSL2) requires: implementing the interface, adding a `case` to `New()`, and handling driver-specific init adaptations in `initRun`. No existing command files need modification.
 
 ### Progress Bar Pooling
 
-Key constraints discovered from pb/v3 v3.1.7 source:
+pb/v3's `StartPool` manages all bars in a single terminal region. Key constraints discovered from reading pb/v3 v3.1.7 source:
 
-- **Never call `bar.Start()` on a pooled bar** — it spawns an independent render goroutine causing duplicate output.
-- `pb.startTime` initialises lazily at pool-start time; `{{etime .}}` therefore reflects pool age, not per-download time.
-- `bar.render()` sets `pb.state.time = time.Now()` unconditionally on every tick, even for finished bars — root cause of the elapsed-time-keeps-growing bug.
+- `bar.Start()` spawns an independent render goroutine; calling it before `StartPool` causes each bar to render twice. **Rule: never call `bar.Start()` on a pooled bar.**
+- `pb.startTime` is initialised lazily on first `bar.render()` (at pool-start time, before any work begins). `{{etime .}}` therefore reflects pool age, not per-download age.
+- `bar.render()` sets `pb.state.time = time.Now()` unconditionally — even for finished bars. The pool keeps ticking until `pool.Stop()`, so a bar's elapsed timer increases until the last goroutine finishes.
 
-Fix: named-return defer in `fromUrl` replaces `{{etime .}}` with a frozen static string at the moment of download completion. See Section 7 for full implementation.
+Fix: frozen template via named-return defer in `fromUrl`. The deferred closure fires on return; on success it computes elapsed time from a `dlStart` timestamp (set after HTTP headers arrive), writes a static template string, then calls `bar.Finish()`.
 
 ---
 
@@ -399,56 +509,59 @@ Fix: named-return defer in `fromUrl` replaces `{{etime .}}` with a frozen static
 | Tool | Role |
 |---|---|
 | **Claude Code** (claude.ai/code, Sonnet 4.6 — 1M context) | Primary engineering assistant throughout the project |
-| **ChatGPT** | Design discussion and documentation review |
+| **ChatGPT** | Consulted for design discussion and documentation review |
 
 ---
 
 ### How Claude Code Was Used
 
 **Codebase investigation and call-chain tracing**  
-Traced the full execution path from `gokube init` → `UpgradeDependencies` → `download.FromUrl` → `fromUrl`, confirming all downloads were sequential, that `DeleteExecutable()` made the `os.IsNotExist` guard permanently dead code, and that no shared state existed between tool packages — establishing that concurrency was safe to introduce.
+Claude Code was used to trace the full execution path from `gokube init` through `UpgradeDependencies` → `DownloadExecutable` → `download.FromUrl` → `download.fromUrl`. This confirmed that all downloads were sequential, that `DeleteExecutable()` rendered the `os.IsNotExist` guard permanently dead, and that no shared state existed between tool packages — establishing that parallelism was safe to introduce.
 
 **Architecture analysis before implementation**  
-Three parallelism approaches (semaphore channel, `errgroup`, mutex-serialised) and three cache storage approaches (sidecar file, `~/.gokube/metadata/` directory, JSON manifest with checksums) were evaluated against gokube's existing architecture and upstream review requirements before writing any code.
+Three parallelism approaches (semaphore channel, `errgroup`, mutex-serialised) and three cache storage approaches (sidecar file, `~/.gokube/metadata/`, JSON manifest with checksums) were evaluated collaboratively before writing any code. The recommended approach was argued against gokube's existing architecture and upstream review requirements.
 
 **Library source verification**  
-pb/v3 source files (`pb.go`, `pool.go`, `element.go`) were read directly from the Go module cache rather than documentation. This confirmed that `bar.Start()` spawns an independent goroutine, identified that `pb.startTime` initialises at pool-start time (making `{{etime .}}` reflect pool age), and pinpointed `state.time = time.Now()` on every `render()` call as the root cause of the elapsed-time-keeps-growing bug.
+Rather than assuming library behaviour from documentation, source files were read directly from the Go module cache and from the helm repository. For pb/v3, reading `pb.go`, `pool.go`, and `element.go` from `/c/Users/.../go/pkg/mod/github.com/cheggaaa/pb/v3@v3.1.7/` confirmed that `bar.Start()` unconditionally spawns an independent writer goroutine, identified that `pb.startTime` is initialised lazily at pool-start time (making `{{etime .}}` reflect pool age), and confirmed (from `pb.go:466`) that `pb.state.time = time.Now()` is set on every `render()` call even for finished bars. For the helm-spray Issue #93 fix, reading `pkg/chartutil/save.go:60–67` from the helm source confirmed that `chartutil.SaveDir` serialises `c.Raw[].Data` — not `c.Values` — revealing why mutating the parsed values map had no effect on the saved chart.
 
 **Systematic multi-file refactoring**  
-The `*pb.ProgressBar` parameter threading through 14 files was executed with parallel edits. Claude Code identified that `helmspray`, `helmimage`, and `helmpush` call `download.FromUrl` directly from `InstallPlugin` — a detail missed in the initial scope pass.
+The `*pb.ProgressBar` parameter threading through 14 files (9 tool/plugin packages + download engine + orchestration layer) was executed systematically with parallel edits. Claude Code identified that `helmspray`, `helmimage`, and `helmpush` call `download.FromUrl` directly from `InstallPlugin` — a detail missed in the initial scope pass.
 
 **Integration and conflict analysis**  
-Before merging the Hyper-V branch, a diff analysis identified the 4 overlapping files and predicted all would auto-merge based on non-overlapping line ranges. The prediction was correct — zero manual conflict resolutions required.
+Before merging with the Hyper-V branch, Claude Code performed a detailed diff analysis of all overlapping files, identified the 4 files with potential conflicts, and predicted that all 4 would auto-merge based on non-overlapping line ranges. The prediction was correct — zero manual conflict resolutions were required.
 
 **Bug diagnosis**  
-Five non-obvious bugs diagnosed through source-level investigation:
-1. Blank `0 [` rows at pool start — no template set before `StartPool`
-2. Duplicate bar output — `bar.Start()` called before `StartPool`
-3. Helm plugin cache always missing — wrong binary path in `InstallPlugin`
-4. Inflated elapsed time on cache-hit bars — pool-start `startTime` used as origin
-5. Elapsed time growing after 100% — unconditional `state.time = time.Now()` in `render()`
+Six non-obvious bugs were diagnosed through source-level investigation:
+1. Blank `0 [` rows at pool start (no template set before `StartPool`)
+2. Duplicate bar output (`bar.Start()` before `StartPool`)
+3. Helm plugin cache always missing (wrong binary path in `InstallPlugin`)
+4. Inflated elapsed time on cache-hit bars (pool-start `startTime`)
+5. Elapsed time growing after 100% (unconditional `state.time = time.Now()` in `render()`)
+6. helm-spray Issue #93: single-vector overlay strip failed end-to-end because `chartutil.SaveDir` reads `c.Raw[].Data`, not `c.Values` — chart-defaults vector still contributed `weight` to validation
 
 **Documentation generation**  
-`CLAUDE.md`, `docs/hackathon-submission.md`, `docs/hackathon-progress.md`, and this document were produced using the implementation as the source of truth.
+`CLAUDE.md`, `docs/hackathon-submission.md`, `docs/hackathon-progress.md`, and this document were written with Claude Code using implementation as the source of truth.
 
 ---
 
 ### Agentic Features Used
 
-**Claude Code CLI with MCP (Model Context Protocol)**:
+**Claude Code CLI with MCP (Model Context Protocol)** was used throughout. Key agentic capabilities:
 
-- **Multi-file parallel reads and edits** — independent files processed concurrently, reducing round-trips.
+- **Multi-file parallel reads and edits** — independent files were processed concurrently in a single response, reducing round-trips.
 - **Bash tool execution** — build verification (`go build`, `go vet`), git operations, grep across the module cache.
-- **Persistent memory** — `~/.claude/projects/` preserved architecture decisions and known bugs across sessions without re-reading the full codebase each time.
-- **Task tracking** — `TaskCreate`/`TaskUpdate` tracked multi-step integration work across branch creation, merge, conflict resolution, and verification.
-- **GitLab/GitHub MCP** — teammate's fork inspected via `git ls-remote` / `git fetch` to understand Hyper-V branch state before integration.
+- **Persistent memory** — a `~/.claude/projects/` memory system was used to preserve architecture decisions, design constraints, and known bugs across sessions without re-reading the full codebase each time.
+- **Task tracking** — `TaskCreate`/`TaskUpdate` tools tracked multi-step integration work (branch creation, merge, conflict resolution, build verification, push).
+- **GitLab/GitHub MCP** — the teammate's fork was inspected directly via `git ls-remote` and `git fetch` to understand the Hyper-V branch state before integration.
 
 **Key learnings**
-- Reading library source from the module cache is more reliable than documentation for understanding subtle API behaviour, particularly around goroutine lifecycle.
-- Detailed pre-merge conflict analysis (predicting which files will conflict and why) significantly reduces integration time.
-- Named-return patterns in Go are underused for deferred cleanup that depends on function success/failure — the `fromUrl` fix is a clean example.
+
+- Reading library source from the module cache is more reliable than documentation for understanding subtle API behaviour — this applied to both pb/v3 pool rendering and `chartutil.SaveDir` (helm-spray Issue #93). In both cases, the type signatures were misleading; only the source revealed the actual data path.
+- For integration tasks, a detailed pre-merge conflict analysis (predicting which files will conflict and why) reduces integration time significantly.
+- Named-return patterns in Go are underused for deferred cleanup that depends on the success/failure of a function — the `fromUrl` fix is a clean example.
 
 **Limitations observed**
+
 - Claude Code cannot run the binary on the target platform (Windows). All validation was build-level (`go build`, `go vet`) plus manual execution.
 - The 1M context window required active memory management across long sessions to avoid losing early architectural decisions.
 
@@ -457,6 +570,8 @@ Five non-obvious bugs diagnosed through source-level investigation:
 ## Section 6 — Quality & Testing
 
 ### Build Verification
+
+All changes were verified with a Windows/amd64 cross-compile from the integration host:
 
 ```sh
 cd cmd/gokube
@@ -470,42 +585,71 @@ Both commands produced zero errors or warnings across all integration commits.
 
 | Scenario | Validation method | Result |
 |---|---|---|
-| Cold first-run | `gokube init` with no `~/.gokube/metadata/` | All 9 downloads completed; metadata written; 9 named bars visible |
-| Warm re-run | `gokube init` immediately after first run | All 9 bars `already up to date`; no HTTP requests; total < 1 s |
+| Cold first-run | `gokube init` with no `~/.gokube/metadata/` | All 9 downloads completed; metadata files written; 9 named bars visible |
+| Warm re-run | `gokube init` immediately after first run | All 9 bars: `already up to date`; no HTTP requests; total < 1 s |
 | Partial failure retry | Kill network mid-download; re-run | Only failed tools re-downloaded; completed tools served from cache |
 | Version bump (one tool) | Change one `DEFAULT_*_VERSION`; re-run | Only the modified tool re-downloaded |
-| `gokube init -cu` | After a successful first run | All binaries + metadata deleted; all 9 re-downloaded |
+| `gokube init -cu` | After a successful first run | All binaries deleted; all metadata deleted; all 9 re-downloaded |
 | `gokube init -u` | After a successful first run | Identical to plain init; all cache hits |
 | Helm plugin cache | Second run after first install | All three plugins show `already up to date` |
 | Progress bar freeze | Download reaching 100% with others still running | Completed bar frozen to `done (Xs)`; other bars continue |
-| `gokube reset` (VM stopped) | Reset when VM was not running | Snapshot restored; VM started; correct message printed |
+| `gokube reset` (VM stopped) | Reset when VM was not running | Snapshot restored; VM started; `VM was stopped before reset, starting after restore...` |
 | Hyper-V `--driver hyperv` | `gokube init --driver hyperv` (elevated shell) | VM created on Hyper-V; driver persisted; subsequent commands use Hyper-V automatically |
-| Hyper-V validation — not elevated | `gokube init --driver hyperv` without elevation | Clear error directing user to run as Administrator |
+| Hyper-V validation — not elevated | `gokube init --driver hyperv` without elevation | Clear error message directing user to run as Administrator |
 | VirtualBox default preserved | `gokube init` (no flags) | Identical to pre-hackathon VirtualBox behaviour |
+| helm-spray Issue #93 — synthetic | Umbrella chart with strict `values.schema.json` + subchart `weight` | `helm spray` deploys successfully; schema validation passes; non-spray values preserved |
+| helm-spray Issue #93 — OTA Cloud | Production umbrella (30+ subcharts, `.tgz` deps, `requirements.yaml`, `--target` scoping) | Patched plugin completes in 6 s; `appVersion` correctly resolved from packaged `.tgz` |
 
 ### Regression Testing
 
-- VirtualBox default path verified to behave identically to the pre-hackathon baseline.
-- All six VM lifecycle commands (init, start/stop, pause/resume, save/reset) verified to route through the correct hypervisor implementation.
-- `gokube reset --clean` flag verified safe: restore completes before `start()` is called.
+- VirtualBox default path was manually verified to behave identically to the pre-hackathon baseline.
+- All six VM lifecycle commands (init, start/stop, pause/resume, save/reset) were verified to route through the correct hypervisor implementation.
+- The `gokube reset --clean` flag (deletes snapshot after restore) was verified safe: restore completes before `start()` is called.
 
 ### Code Quality Improvements
 
-- Removed six unconditional `DeleteExecutable()` calls and three `DeletePlugin()` calls that preceded each download in `UpgradeDependencies` / `UpgradeHelmPlugins`.
-- Replaced hardcoded `/dev/sdb` swap device with dynamic node detection (`listMinikubeDisks` / `detectNewSwapDevice` / `formatAndEnableSwap`).
+- Removed six unconditional `DeleteExecutable()` calls that preceded each download in `UpgradeDependencies`.
+- Removed three unconditional `DeletePlugin()` calls in `UpgradeHelmPlugins`.
+- Replaced `addSwapToMinikube()` (hardcoded `/dev/sdb`) with device-node detection (`listMinikubeDisks` / `detectNewSwapDevice` / `formatAndEnableSwap`).
 - Removed stale `os/exec` import from `init.go`.
-- Added `gokube.exe` to `.gitignore`; removed committed binary from git history.
-- Removed the `if !keepVM { if askForUpgrade { ... } }` nesting that obscured the upgrade path.
+- Added root-level `gokube.exe` to `.gitignore`; removed committed binary from git history.
+- Removed the `if !keepVM { if askForUpgrade { ... } }` nesting that made the upgrade path non-obvious.
+- `helm-spray` (upstream): removed `weight` from Helm's validation surface via two-layer sanitisation; fix is self-contained with no changes required to consuming charts or user workflows.
 
 ---
 
 ## Section 7 — Technical Documentation
 
+### Architecture
+
+gokube follows a command → orchestration → tool-wrapper → exec layering:
+
+```
+main.go
+  └── cmd/root.go          (Cobra root; version constants; global vars; resolveDriver)
+        ├── cmd/init.go    (init flow: download → VM → chartmuseum → plugins → config)
+        ├── cmd/start.go   (minikube start via persisted driver)
+        ├── cmd/reset.go   (snapshot restore → always start)
+        ├── cmd/save.go    (snapshot create)
+        ├── cmd/pause.go
+        ├── cmd/resume.go
+        └── cmd/swap.go    (swap device detection helpers)
+
+pkg/gokube/gokube.go       (orchestration: UpgradeDependencies, UpgradeHelmPlugins, WriteConfig)
+pkg/download/download.go   (HTTP fetch, archive extraction, cache helpers)
+pkg/hypervisor/            (Hypervisor interface + VirtualBox and Hyper-V implementations)
+pkg/virtualbox/            (VBoxManage wrappers, registry edits, DHCP lease clearing)
+pkg/minikube/              (minikube CLI wrappers)
+pkg/{helm,docker,kubectl,stern,k9s}/     (tool download + exec wrappers)
+pkg/{helmspray,helmimage,helmpush}/       (plugin download wrappers)
+pkg/utils/                 (path helpers, archive extraction, progress bar reader)
+```
+
 ### Execution Flow — `gokube init`
 
 1. Parse flags: `--driver`, `--hyperv-virtual-switch`, `--memory`, `--cpus`, `--kubernetes-version`, etc.
 2. `gokube.ReadConfig` — load persisted settings from `~/.gokube/config.yaml`.
-3. Version check — if `gokube-version` in config < `GOKUBE_VERSION` (1.38.0), force `askForClean = true`.
+3. Version check — if `gokube-version` in config is lower than `GOKUBE_VERSION` (1.38.0), force `askForClean = true`.
 4. `checkMinimumRequirements` — validate requested tool versions against minimum floors.
 5. `hypervisor.New(driver).Validate(hypervVirtualSwitch)` — pre-flight checks (Hyper-V only).
 6. Set `ipCheckNeeded` — disabled for Hyper-V (dynamic IP).
@@ -562,16 +706,18 @@ DownloadExecutable(url, version, bar):
     return nil
 
   os.RemoveAll(localFile)
-  os.RemoveAll(VersionFile(localFile))   // metadata always purged on miss
+  os.RemoveAll(VersionFile(localFile))   // ← metadata always purged on miss
   download.FromUrl(url, version, ..., bar)
   return WriteVersion(localFile, version)
 ```
 
-`WriteVersion` is called only on success — a crash mid-download leaves no metadata file, so the next run correctly detects a cache miss and retries. For helm plugins, `pluginDir` (used for `os.RemoveAll` and download destination) and `installedBinary` (`pluginDir/bin/<exe>`, used for `IsCurrentVersion` and `WriteVersion`) are kept as separate variables — essential for correct caching.
+`WriteVersion` is called only on success. A crash during download leaves no metadata file, so the next run detects a cache miss and retries correctly.
+
+For helm plugins, the binary path is `<pluginDir>/bin/<exe>` — not `<pluginDir>/<exe>`. The split between `pluginDir` (used for `os.RemoveAll`) and `installedBinary` (used for `IsCurrentVersion`/`WriteVersion`) is essential for correct caching.
 
 ### Progress Bar Implementation
 
-Four bar states, all managed via template strings:
+Three templates cover all bar states:
 
 ```go
 // 1. Waiting — set before StartPool
@@ -587,10 +733,11 @@ Four bar states, all managed via template strings:
 `{{ green "minikube v1.38.0" }} already up to date`
 ```
 
-Elapsed time freeze via named-return defer in `fromUrl`:
+The deferred closure in `fromUrl`:
 
 ```go
 func fromUrl(...) (n int64, retErr error) {
+    // ...
     dlStart := time.Now()
     defer func() {
         if retErr == nil {
@@ -603,7 +750,73 @@ func fromUrl(...) (n int64, retErr error) {
 }
 ```
 
-`dlStart` is set after HTTP response headers arrive, measuring actual body transfer + archive extraction time. The deferred closure replaces the live `{{etime .}}` template with a frozen static string, preventing the pool's continued `render()` ticks from incrementing the counter.
+`dlStart` is set after HTTP response headers arrive, measuring actual body transfer + archive extraction time.
+
+### Helm Plugin Workflow
+
+```go
+func UpgradeHelmPlugins(plugins *HelmPlugins) error {
+    // Pre-create 3 bars with waiting-state templates
+    pool, _ := pb.StartPool(bars...)
+
+    // Three goroutines, no semaphore
+    var wg sync.WaitGroup
+    for _, task := range tasks {
+        wg.Add(1)
+        go func(t func() error) {
+            defer wg.Done()
+            t()
+        }(task)
+    }
+    wg.Wait()
+    pool.Stop()
+    return firstErr
+}
+```
+
+Each `InstallPlugin` follows: `IsCurrentVersion(installedBinary)` → cache hit or `os.RemoveAll(pluginDir)` + `download.FromUrl(pluginDir)` + `WriteVersion(installedBinary)`.
+
+### helm-spray Schema Validation Fix (Issue #93)
+
+**Two-layer architecture** (`ThalesGroup/helm-spray`):
+
+```
+Spray.Spray()
+  ├── dependencies.Get(chart)          ← extracts weights into []Dependency slice
+  ├── materialiseStrippedChart(chart)  ← Layer 2: write sanitised chart to temp dir
+  │     ├── stripWeightFromRawValues(umbrella)   ← mutate c.Raw[].Data for umbrella
+  │     └── stripWeightFromRawValues(subcharts)  ← mutate c.Raw[].Data per subchart
+  │           └── chartutil.SaveDir(tempDir)     ← writes from Raw, not Values
+  └── upgrade(deps, wave, strippedChartPath)
+        └── helm.UpgradeWithValues(strippedChartPath, overlay)
+              └── overlay stripped by StripSprayKeys  ← Layer 1
+```
+
+**Key implementation detail — why `c.Raw[].Data`, not `c.Values`:**
+
+```go
+// chartutil.SaveDir (helm.sh/helm/v3 v3.18.5, pkg/chartutil/save.go:60-67)
+// writes values.yaml content from c.Raw[name=="values.yaml"].Data — the raw bytes.
+// It does NOT consult c.Values (the parsed map[string]interface{}).
+// Consequence: mutating c.Values has zero effect on the saved chart.
+
+func stripWeightFromRawValues(chrt *helmChart.Chart, umbrella bool) error {
+    // Find values.yaml in chrt.Raw
+    // Parse YAML bytes → delete weight key(s) → re-serialise
+    // Write result back to chrt.Raw[i].Data  ← must target Raw, not Values
+}
+```
+
+**Why both layers are required:**
+
+| Vector | Source | Stripped by |
+|---|---|---|
+| Overlay | helm-spray's temp `-f` file | Layer 1: `StripSprayKeys` |
+| Chart defaults | On-disk `values.yaml` loaded by `loader.Load` | Layer 2: `materialiseStrippedChart` |
+
+Stripping only the overlay still leaves `weight` in the chart's `values.yaml`, which Helm 3 reads independently during coalescing. A single-vector fix compiles cleanly but fails end-to-end — confirmed by running the reproducer before and after each layer.
+
+**Safety guarantee:** `materialiseStrippedChart` runs after `dependencies.Get` has already extracted `weight` values into the `[]Dependency` ordering slice. Spray's wave logic reads from that slice, not from the chart — deployment order is fully preserved.
 
 ### Hyper-V Support
 
@@ -641,7 +854,7 @@ func New(driver string) (Hypervisor, error) {
 
 **Hyper-V validation** (`hyperv.go:Validate`):
 1. `isElevated()` via `windows.GetCurrentProcessToken().IsElevated()`.
-2. `Get-VM -ErrorAction Stop` availability check (confirms Hyper-V is enabled).
+2. `Get-VM -ErrorAction Stop` availability check.
 3. `Get-VMSwitch -Name '<switch>'` if a name was supplied.
 
 **Config persistence**:
@@ -651,10 +864,14 @@ func New(driver string) (Hypervisor, error) {
 viper.Set("minikube-driver", driver)
 viper.Set("hyperv-virtual-switch", hypervVirtualSwitch)
 
-// Read by all subsequent commands
+// Read by all other commands
 func resolveDriver() string {
-    if d := viper.GetString("minikube-driver"); len(d) > 0 { return d }
-    if d := os.Getenv("MINIKUBE_DRIVER"); len(d) > 0 { return d }
+    if d := viper.GetString("minikube-driver"); len(d) > 0 {
+        return d
+    }
+    if d := os.Getenv("MINIKUBE_DRIVER"); len(d) > 0 {
+        return d
+    }
     return DEFAULT_MINIKUBE_DRIVER  // "virtualbox"
 }
 ```
@@ -690,25 +907,25 @@ cmd/
   gokube/
     main.go
     cmd/
-      root.go        init.go      reset.go     save.go
-      start.go       pause.go     resume.go    swap.go
+      root.go          init.go       reset.go      save.go
+      start.go         pause.go      resume.go     swap.go
       version.go
 
 pkg/
-  gokube/       ← orchestration (UpgradeDependencies, UpgradeHelmPlugins, WriteConfig)
-  download/     ← HTTP fetch, archive extraction, cache helpers
-  hypervisor/   ← Hypervisor interface + VirtualBox shim + Hyper-V impl
-  virtualbox/   ← VBoxManage wrappers, registry, DHCP leases
-  minikube/     ← minikube CLI wrappers
-  helm/         ← helm CLI wrappers + DownloadExecutable
-  docker/       ← docker CLI wrappers + DownloadExecutable
-  kubectl/      ← kubectl CLI wrappers + DownloadExecutable
-  stern/        ← stern CLI wrappers + DownloadExecutable
-  k9s/          ← k9s CLI wrappers + DownloadExecutable
-  helmspray/    ← InstallPlugin (helm-spray)
-  helmimage/    ← InstallPlugin (helm-image)
-  helmpush/     ← InstallPlugin (helm-push)
-  utils/        ← path helpers, archive extraction, progress bar reader
+  gokube/              ← orchestration (UpgradeDependencies, UpgradeHelmPlugins, WriteConfig)
+  download/            ← HTTP fetch, archive extraction, cache helpers
+  hypervisor/          ← Hypervisor interface + VirtualBox shim + Hyper-V impl
+  virtualbox/          ← VBoxManage wrappers, registry, DHCP leases
+  minikube/            ← minikube CLI wrappers
+  helm/                ← helm CLI wrappers + DownloadExecutable
+  docker/              ← docker CLI wrappers + DownloadExecutable
+  kubectl/             ← kubectl CLI wrappers + DownloadExecutable
+  stern/               ← stern CLI wrappers + DownloadExecutable
+  k9s/                 ← k9s CLI wrappers + DownloadExecutable
+  helmspray/           ← InstallPlugin (helm-spray)
+  helmimage/           ← InstallPlugin (helm-image)
+  helmpush/            ← InstallPlugin (helm-push)
+  utils/               ← path helpers, archive extraction, progress bar reader
 
 scripts/
   setup-hyperv-switch.ps1    ← PowerShell helper for Hyper-V virtual switch setup
@@ -720,10 +937,25 @@ docs/
   hackathon-presentation.md
   A4I Hackathon_Neural Ninjas_MarkdownFile.md
 
-CLAUDE.md       ← architecture decisions, design constraints, known issues
+CLAUDE.md              ← architecture decisions, design constraints, known issues
 CHANGELOG.md
 README.md
 ```
+
+### Key Packages Modified
+
+| Package | Key changes |
+|---|---|
+| `pkg/gokube` | `UpgradeDependencies` rewritten (goroutines + semaphore + pool); `UpgradeHelmPlugins` rewritten (goroutines + pool); `DeleteAllExecutables()` added; `WriteConfig` signature extended |
+| `pkg/download` | `fromUrl` named-return defer; `VersionFile`, `IsCurrentVersion`, `WriteVersion`, `DeleteAllMetadata` added |
+| `pkg/hypervisor` | Entirely new package (6 files) |
+| `pkg/minikube` | `Start` extended with `driver`/`hypervVirtualSwitch`; `DownloadExecutable` extended with bar + cache |
+| 5 tool packages | `DownloadExecutable` extended with bar + cache |
+| 3 plugin packages | `InstallPlugin` extended with bar + cache; `pluginDir`/`installedBinary` path split |
+| `cmd/init.go` | Unconditional checks; clean block; driver flags; hypervisor validation |
+| `cmd/reset.go` | Always-start; Hyper-V lifecycle |
+| `cmd/pause/resume/save` | Hyper-V lifecycle via `hv.*` |
+| `cmd/swap.go` | New — device detection helpers |
 
 ### Configuration
 
@@ -742,11 +974,11 @@ README.md
 **Adding a third driver** (e.g., WSL2):
 1. Implement `Hypervisor` interface in a new `pkg/hypervisor/wsl2.go`.
 2. Add `case DriverWSL2: return &wsl2Hypervisor{}, nil` to `New()`.
-3. Handle driver-specific adaptations in `initRun` (IP check, DHCP skip).
+3. Add `DEFAULT_MINIKUBE_DRIVER` option and handle driver-specific adaptations in `initRun` (IP check, DHCP skip).
 
 **Adjusting download concurrency**: change the single constant `3` in `make(chan struct{}, 3)` in `UpgradeDependencies`.
 
-**Adding a fourth helm plugin**: add a bar to the pool, a goroutine, and an `InstallPlugin` call. The semaphore-free design requires no additional coordination.
+**Adding a fourth helm plugin**: add a bar to the pool, add a goroutine + task, add the `InstallPlugin` call. The semaphore-free design means no additional code needed unless the count exceeds comfortable simultaneous connections.
 
 ---
 
@@ -792,21 +1024,22 @@ gokube init --driver hyperv --hyperv-virtual-switch "Default Switch"
 
 ### Important Design Constraints
 
-- `pkg/hypervisor` **must not** import `pkg/minikube`. The driver name and switch flow into `minikube.Start` as plain parameters from the cmd layer.
-- `bar.Start()` must **never** be called on a bar that will be passed to `StartPool`. It spawns a competing render goroutine causing duplicate output.
-- `WriteVersion` must only be called on the **success path**. On error, no metadata file is written so the next run retries.
-- `DeleteAllExecutables()` must be called **before** `upgradeDependencies()`, not after.
+- `pkg/hypervisor` **must not** import `pkg/minikube`. The driver name and virtual switch flow into `minikube.Start` as plain parameters from the cmd layer.
+- `bar.Start()` must **never** be called on a bar that will be passed to `StartPool`. It spawns a competing render goroutine.
+- `WriteVersion` must only be called on the **success path** after a completed download. On error, no metadata file is written so the next run retries.
+- `DeleteAllExecutables()` must be called with all working directory deletes **before** `upgradeDependencies()`, not after.
 
 ### Known Limitations
 
 | Limitation | Notes |
 |---|---|
 | No automated test suite | gokube has no test infrastructure. All validation is manual. |
-| Semaphore cap of 3 not benchmarked | Chosen conservatively for corporate proxies; tunable. |
-| ~50% speedup is estimated | Based on architectural analysis, not measured timing. |
+| Semaphore cap of 3 not measured | Chosen conservatively for corporate proxies; not benchmarked. |
+| `~50%` speedup is estimated | Based on architectural analysis, not measured timing. |
 | Swap on Hyper-V is experimental | Documented in README and CHANGELOG. |
-| Elapsed time on active downloads is pool-relative | `dlStart` set after HTTP headers; good approximation for first-batch tools. |
+| Elapsed time on active downloads is pool-relative | `dlStart` is set after HTTP headers; includes body transfer + extraction. For tools in the first semaphore batch, this is a good approximation. |
 | VirtualBox and Hyper-V cannot coexist on the same host | Windows limitation; not a gokube constraint. |
+| helm-spray: user-supplied `-f` files containing `weight` | If a user explicitly passes `weight` in a `-f` override file to a strict-schema chart, validation may still trip. Mitigation: `weight` should only appear in chart values, not in user override files. |
 
 ### Future Improvements
 
@@ -816,9 +1049,9 @@ gokube init --driver hyperv --hyperv-virtual-switch "Default Switch"
 | Download retry on transient failures | Wrap `fromUrl` in a 2–3 attempt retry loop |
 | `gokube version --all` from metadata | Read `~/.gokube/metadata/` without exec'ing each binary |
 | WSL2 driver support | Pre-existing `TODO` in `root.go`; interface is ready |
-| Automatic driver detection | Detect active Hyper-V and suggest `--driver hyperv` |
-| JSON manifest with checksums | Enterprise integrity verification; adds per-release maintenance |
-| Automated test suite | Significant infrastructure investment required |
+| Automatic driver detection | Detect whether Hyper-V is active and suggest `--driver hyperv` |
+| JSON manifest with checksums | Enterprise integrity verification; adds per-release maintenance cost |
+| Automated test suite | Would require significant infrastructure investment |
 
 ### References
 
@@ -826,6 +1059,7 @@ gokube init --driver hyperv --hyperv-virtual-switch "Default Switch"
 - [minikube Hyper-V driver documentation](https://minikube.sigs.k8s.io/docs/drivers/hyperv/)
 - [ThalesGroup/gokube](https://github.com/ThalesGroup/gokube)
 - [ThalesGroup/miniapps](https://thalesgroup.github.io/miniapps)
+- [ThalesGroup/helm-spray Issue #93](https://github.com/ThalesGroup/helm-spray/issues/93) — schema validation conflict root cause and fix
 
 ---
 
