@@ -31,6 +31,10 @@ const (
 	LOCAL_EXECUTABLE_NAME = "minikube.exe"
 )
 
+func bin() string {
+	return utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
+}
+
 // Start ...
 func Start(memory int16, cpus int16, diskSize string, httpProxy string, httpsProxy string, noProxy string, insecureRegistry string, kubernetesVersion string, cache bool, dnsProxy bool, hostDNSResolver bool, dnsDomain string, containerRuntime string, force bool, verbose bool, driver string, hypervVirtualSwitch string) error {
 	var args = []string{"start", "--kubernetes-version", kubernetesVersion, "--insecure-registry", insecureRegistry, "--memory", strconv.FormatInt(int64(memory), 10), "--cpus", strconv.FormatInt(int64(cpus), 10), "--disk-size", diskSize}
@@ -77,7 +81,7 @@ func Start(memory int16, cpus int16, diskSize string, httpProxy string, httpsPro
 	if verbose {
 		args = append(args, "--alsologtostderr", "--v=1")
 	}
-	cmd := exec.Command("minikube", args...)
+	cmd := exec.Command(bin(), args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -95,7 +99,7 @@ func Restart(kubernetesVersion string, containerRuntime string, force bool, verb
 	if verbose {
 		args = append(args, "--alsologtostderr", "--v=1")
 	}
-	cmd := exec.Command("minikube", args...)
+	cmd := exec.Command(bin(), args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -103,7 +107,7 @@ func Restart(kubernetesVersion string, containerRuntime string, force bool, verb
 
 // Stop ...
 func Stop() error {
-	cmd := exec.Command("minikube", "stop")
+	cmd := exec.Command(bin(), "stop")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -111,7 +115,7 @@ func Stop() error {
 
 // Delete ...
 func Delete() error {
-	cmd := exec.Command("minikube", "delete")
+	cmd := exec.Command(bin(), "delete")
 	//	cmd.Stdout = os.Stdout
 	//	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -119,7 +123,7 @@ func Delete() error {
 
 // AddonsEnable ...
 func AddonsEnable(addon string) error {
-	cmd := exec.Command("minikube", "addons", "enable", addon)
+	cmd := exec.Command(bin(), "addons", "enable", addon)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -127,7 +131,7 @@ func AddonsEnable(addon string) error {
 
 // ConfigSet ...
 func ConfigSet(key string, value string) error {
-	cmd := exec.Command("minikube", "config", "set", key, value)
+	cmd := exec.Command(bin(), "config", "set", key, value)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -135,7 +139,7 @@ func ConfigSet(key string, value string) error {
 
 // Version ...
 func Version() error {
-	cmd := exec.Command("minikube", "version")
+	cmd := exec.Command(bin(), "version")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -143,7 +147,7 @@ func Version() error {
 
 // Ip ...
 func Ip() (string, error) {
-	out, err := exec.Command("minikube", "ip").Output()
+	out, err := exec.Command(bin(), "ip").Output()
 	if err != nil {
 		return "", err
 	}

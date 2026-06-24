@@ -29,10 +29,14 @@ const (
 	LOCAL_EXECUTABLE_NAME = "docker.exe"
 )
 
+func bin() string {
+	return utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
+}
+
 // Version ...
 func Version() error {
 	fmt.Println("docker version:")
-	cmd := exec.Command("docker", "version")
+	cmd := exec.Command(bin(), "version")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

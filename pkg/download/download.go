@@ -130,6 +130,35 @@ func DeleteAllMetadata() error {
 	return os.RemoveAll(filepath.Join(utils.GetUserHome(), ".gokube", "metadata"))
 }
 
+// moveFile moves src to dst, falling back to copy+delete when os.Rename
+// fails across drive boundaries (common on Windows with TEMP on C: and bin on D:).
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		in.Close()
+		return err
+	}
+	_, err = io.Copy(out, in)
+	in.Close() // must close before os.Remove on Windows — open handles block deletion
+	if err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	if err = out.Close(); err != nil {
+		os.Remove(dst)
+		return err
+	}
+	return os.Remove(src)
+}
+
 // FromUrl ...
 func FromUrl(urlTpl string, version string, name string, fileMaps []*FileMap, dst string, bar *pb.ProgressBar) (int64, error) {
 
@@ -158,7 +187,7 @@ func FromUrl(urlTpl string, version string, name string, fileMaps []*FileMap, ds
 			}
 		}
 		fileSrc := tempDir + string(os.PathSeparator) + fileMap.Src
-		err = os.Rename(fileSrc, fileDst)
+		err = moveFile(fileSrc, fileDst)
 		if err != nil {
 			return -1, err
 		}

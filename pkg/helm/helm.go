@@ -30,6 +30,10 @@ const (
 	LOCAL_EXECUTABLE_NAME = "helm.exe"
 )
 
+func bin() string {
+	return utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
+}
+
 // Upgrade ...
 func Upgrade(chart string, version string, release string, namespace string, configuration string, valuesFile string) error {
 	var args = []string{"upgrade", "--install", "--devel", release, chart}
@@ -46,14 +50,14 @@ func Upgrade(chart string, version string, release string, namespace string, con
 		args = append(args, "-f", valuesFile)
 	}
 	fmt.Println("Starting " + chart + " components...")
-	cmd := exec.Command("helm", args...)
+	cmd := exec.Command(bin(), args...)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 // RepoAdd ...
 func RepoAdd(name string, repo string) error {
-	cmd := exec.Command("helm", "repo", "add", name, repo)
+	cmd := exec.Command(bin(), "repo", "add", name, repo)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -61,7 +65,7 @@ func RepoAdd(name string, repo string) error {
 
 // RepoUpdate ...
 func RepoUpdate() error {
-	cmd := exec.Command("helm", "repo", "update")
+	cmd := exec.Command(bin(), "repo", "update")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -70,7 +74,7 @@ func RepoUpdate() error {
 // Version ...
 func Version() error {
 	fmt.Print("helm version: ")
-	cmd := exec.Command("helm", "version", "--client", "--short")
+	cmd := exec.Command(bin(), "version", "--client", "--short")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -79,7 +83,7 @@ func Version() error {
 // PluginsVersion ...
 func PluginsVersion() error {
 	fmt.Println("helm plugins version:")
-	cmd := exec.Command("helm", "plugin", "list")
+	cmd := exec.Command(bin(), "plugin", "list")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

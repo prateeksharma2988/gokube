@@ -30,10 +30,14 @@ const (
 	LOCAL_EXECUTABLE_NAME = "stern.exe"
 )
 
+func bin() string {
+	return utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
+}
+
 // Version ...
 func Version() error {
 	fmt.Println("stern version: ")
-	cmd := exec.Command("stern", "-v")
+	cmd := exec.Command(bin(), "-v")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

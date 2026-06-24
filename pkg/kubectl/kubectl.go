@@ -30,13 +30,17 @@ const (
 	LOCAL_EXECUTABLE_NAME = "kubectl.exe"
 )
 
+func bin() string {
+	return utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
+}
+
 // Get ...
 func Get(namespace string, resourceType string, resourceName string, jsonPath string) (string, error) {
 	var args = []string{"--namespace", namespace, "get", resourceType, resourceName}
 	if len(jsonPath) > 0 {
 		args = append(args, "-o", "jsonpath="+jsonPath)
 	}
-	output, err := exec.Command("kubectl", args...).Output()
+	output, err := exec.Command(bin(), args...).Output()
 	if err != nil {
 		return "", err
 	}
@@ -45,7 +49,7 @@ func Get(namespace string, resourceType string, resourceName string, jsonPath st
 
 // ConfigUseContext ...
 func ConfigUseContext(context string) error {
-	cmd := exec.Command("kubectl", "config", "use-context", context)
+	cmd := exec.Command(bin(), "config", "use-context", context)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -53,7 +57,7 @@ func ConfigUseContext(context string) error {
 
 // Patch ...
 func Patch(namespace string, resourceType string, resourceName string, patch string) error {
-	cmd := exec.Command("kubectl", "--namespace", namespace, "patch", resourceType, resourceName, "-p", patch)
+	cmd := exec.Command(bin(), "--namespace", namespace, "patch", resourceType, resourceName, "-p", patch)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -62,7 +66,7 @@ func Patch(namespace string, resourceType string, resourceName string, patch str
 // Version ...
 func Version() error {
 	fmt.Println("kubectl version: ")
-	cmd := exec.Command("kubectl", "version")
+	cmd := exec.Command(bin(), "version")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

@@ -30,10 +30,14 @@ const (
 	LOCAL_EXECUTABLE_NAME = "k9s.exe"
 )
 
+func bin() string {
+	return utils.GetBinDir("gokube") + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME
+}
+
 // Version ...
 func Version() error {
 	fmt.Println("k9s version: ")
-	cmd := exec.Command("k9s", "version")
+	cmd := exec.Command(bin(), "version")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

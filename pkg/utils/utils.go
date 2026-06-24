@@ -49,7 +49,7 @@ func GetUserHome() string {
 // GetBinDir ...
 func GetBinDir(executable string) string {
 	path, err := exec.LookPath(executable)
-	if err != nil {
+	if err != nil && !errors.Is(err, exec.ErrDot) {
 		fmt.Printf("Error: cannot determine %s directory\n", executable)
 		os.Exit(1)
 	}
