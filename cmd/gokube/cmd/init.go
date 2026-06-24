@@ -315,6 +315,15 @@ func initRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Persist gokube-version immediately after downloads succeed.
+	// If any subsequent step (VM creation, ChartMuseum, helm repos) fails and
+	// initRun returns early, the version is already written. The next run will
+	// read "1.38.0", skip the forced-clean path, and serve all tools from cache
+	// instead of wiping metadata and re-downloading everything.
+	if err = gokube.WriteConfig(gokubeVersion, kubernetesVersion, containerRuntime, driver, hypervVirtualSwitch); err != nil {
+		return fmt.Errorf("cannot write gokube configuration: %w", err)
+	}
+
 	if !keepVM {
 		// Disable notification for updates
 		_ = minikube.ConfigSet("WantUpdateNotification", "false")
