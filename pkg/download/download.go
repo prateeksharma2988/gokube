@@ -131,7 +131,7 @@ func DeleteAllMetadata() error {
 }
 
 // moveFile moves src to dst, falling back to copy+delete when os.Rename
-// fails across drive boundaries (common on Windows with TEMP on C: and bin on D:).
+// fails across drive boundaries or filesystem boundaries.
 func moveFile(src, dst string) error {
 	if err := os.Rename(src, dst); err == nil {
 		return nil
